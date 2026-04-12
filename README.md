@@ -163,18 +163,39 @@ pytest tests/ -v
 
 ```text
 prayaan-engine/
+│
 ├── app/
-│   ├── main.py
-│   ├── core/state.py
-│   ├── models/schemas.py
-│   ├── services/engine.py
-├── worker/
-│   ├── policy_workflow.py
+│   ├── __init__.py                 # Required for pytest pathing
+│   ├── main.py                     # FastAPI application & endpoints
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py               # Pydantic-settings configuration loader
+│   │   └── state.py                # Redis Pub/Sub & thread-safe singleton
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── schemas.py              # Pydantic V2 schemas & derived field logic
+│   └── services/
+│       ├── __init__.py
+│       └── engine.py               # Deterministic rule evaluation logic
+│
 ├── data/
-│   └── policy.txt
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+│   └── policy.txt                  # The raw natural language policy document
+│
+├── tests/                          # Bifurcated test suite
+│   ├── __init__.py                 # Required for pytest test discovery
+│   ├── test_engine.py              # Mathematical bounds testing (TDD)
+│   ├── test_integration.py         # Temporal mocked integration tests
+│   └── test_schemas.py             # Pydantic validation & derivation tests
+│
+├── worker/
+│   ├── __init__.py
+│   └── policy_workflow.py          # Temporal workflow & Ollama LLM extraction
+│
+├── .env.example                    # Template for environment variables (12-Factor)
+├── docker-compose.yml              # Infrastructure orchestration (Redis, Temporal, Ollama, API)
+├── pytest.ini                      # Solves the sys.path ModuleNotFoundError
+├── README.md                       # Architecture Decision Record (ADR)
+└── requirements.txt                # Dependency locking
 ```
 
 #### **A. The Models & Contracts (`app/models/schemas.py`)**
