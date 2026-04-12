@@ -45,6 +45,21 @@ sequenceDiagram
     FastAPI (Eval API)-->>Client: 200 OK (Decision & Explainability)
 ```
 
+## 2.a Updated Architecture & Design Rationale
+
+The design is built around the **CQRS (Command Query Responsibility Segregation)** pattern. We separate the computationally heavy Write path (Hot-Reloading) from the ultra-fast Read path (Evaluation).
+
+### Why the Synchronous Monolithic Architecture (The "Student" approach) Fails:
+A common architectural pitfall is to embed the LLM parsing (`Ollama`) directly inside the FastAPI HTTP handler. This is disastrous in a production environment:
+1.  **Blockage:** LLM inference takes 10–30 seconds. A single `/policy/reload` request blocks the entire API process, causing incoming `/evaluate` calls to timeout and drop live loan applications.
+2.  **State Drift:** A local, in-memory cache only works for a single API pod. When scaling to multiple pods, each will maintain a different version of the credit policy, leading to regulatory chaos.
+
+### The Resilient CQRS Fix (This Architecture):
+This system uses asynchronous orchestration to handle the heavy compute:
+
+1.  **Temporal.io (The Mind):** The slow, error-prone LLM call is orchestrated via Temporal. Temporal guarantees durable execution, automatically retrying the LLM parsing until a valid schema is generated, ensuring no dropped state.
+2.  **Redis Pub/Sub (The Nerve Center):** When Temporal successfully compiles a new policy, Redis Pub/Sub broadcasts the payload. All distributed FastAPI pods listen to this channel and automatically update their local threading.Lock() caches simultaneously, achieving safe hot-swapping across the entire cluster.
+
 ---
 
 ## 3. Technology Stack & Design Justifications
@@ -57,6 +72,8 @@ sequenceDiagram
 ---
 
 ## 4. API Documentation & Explainability
+
+*(Note: PII never touches the AI. Explainability is guaranteed mathematically).*
 
 **Explainability Mandate:** As per Requirement #7, the engine does not just return a binary decision. The `/evaluate` response payload includes a `rules_evaluated` array where *every single rule* outputs its `rule_text`, the evaluated `applicant_value`, and the required `threshold`.
 
