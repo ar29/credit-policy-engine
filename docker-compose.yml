@@ -1,13 +1,35 @@
 version: '3.8'
 
 services:
+  # Database for Temporal & Audit Trails
+  postgres:
+    image: postgres:15-alpine
+    container_name: prayaan-postgres
+    environment:
+      - POSTGRES_USER=temporal
+      - POSTGRES_PASSWORD=temporal
+      - POSTGRES_DB=temporal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Message Broker for Hot-Reloading
   redis:
     image: redis:7-alpine
+    container_name: prayaan-redis
     ports:
       - "6379:6379"
 
+  # Temporal Server for Orchestration
   temporal:
     image: temporalio/auto-setup:1.22.0
+    container_name: prayaan-temporal
     environment:
       - DB=postgresql
       - DB_PORT=5432
@@ -17,41 +39,46 @@ services:
     ports:
       - "7233:7233"
       - "8233:8233"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
+  # Local LLM Service
   ollama:
     image: ollama/ollama:latest
+    container_name: prayaan-ollama
     ports:
       - "11434:11434"
     volumes:
       - ./ollama_data:/root/.ollama
-    # Note: Requires running `docker exec -it <container_id> ollama run llama3` after startup
 
+  # FastAPI Evaluation Engine
   api:
     build: .
     container_name: prayaan-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    environment:
-      - REDIS_HOST=redis
-      - TEMPORAL_SERVER_URL=temporal:7233
-    volumes:
-      - .:/code
+    env_file: .env
     ports:
       - "8000:8000"
     depends_on:
-      - redis
-      - temporal
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      temporal:
+        condition: service_started
 
+  # Temporal Worker (Policy Compiler)
   worker:
     build: .
     container_name: prayaan-worker
     command: python worker/policy_workflow.py
-    environment:
-      - REDIS_HOST=redis
-      - TEMPORAL_SERVER_URL=temporal:7233
-      - OLLAMA_BASE_URL=http://ollama:11434/api/generate
-    volumes:
-      - .:/code
+    env_file: .env
     depends_on:
-      - redis
-      - temporal
-      - ollama
+      api:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  ollama_data:

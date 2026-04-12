@@ -6,6 +6,9 @@ from app.core.state import policy_state
 from app.core.config import settings
 from app.models.schemas import ApplicantPayload, DecisionResponse, RuleSchema
 from app.services.engine import DeterministicRuleEngine
+from sqlalchemy.orm import Session
+from app.models.schemas import EvaluationAudit, Base, PolicyAudit
+from worker.policy_workflow import SessionLocal
 
 app = FastAPI(title="Prayaan Credit Engine")
 engine = DeterministicRuleEngine()
@@ -16,10 +19,33 @@ async def startup_event():
 
 @app.post("/evaluate", response_model=DecisionResponse)
 async def evaluate(payload: ApplicantPayload):
-    rules = policy_state.get_rules()
-    if not rules:
-        raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
-    return engine.evaluate(payload, rules)
+    # 1. Get current rules and the active policy_id from our thread-safe state
+    active_rules = policy_state.get_rules()
+    active_id = policy_state.get_current_policy_id() 
+
+    if not active_rules or active_id:
+        raise HTTPException(status_code=533, detail="Rules not loaded. Policy not initialized. Call /policy/reload first.")
+
+    # 2. Deterministic Evaluation (PII never leaves the pod)
+    result = engine.evaluate(payload, active_rules)
+
+    # 3. Log Audit Trail to Postgres
+    # In production, this would be a background task to keep API latency low
+    db = SessionLocal() 
+    audit_entry = EvaluationAudit(
+        application_id=payload.application_id,
+        policy_version_id=active_id,
+        decision=result.decision,
+        reason=result.reason
+    )
+    db.merge(audit_entry) # Use merge to handle retries/re-evaluations
+    db.commit()
+    db.close()
+
+    # Add version to response for transparency
+    response = result.model_dump()
+    response["policy_version"] = active_id
+    return response
 
 @app.get("/rules", response_model=List[RuleSchema])
 async def get_all_rules():

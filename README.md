@@ -5,12 +5,27 @@ This project implements a highly scalable, deterministic Credit Policy Evaluatio
 
 To achieve mathematical compliance, this architecture strictly adheres to the **Smart Data Injection (SDI)** paradigm. It separates the non-deterministic parsing of natural language policies from the deterministic execution of applicant data.
 
+
+
+
 **Key Architectural Achievements:**
 * **Zero PII Exposure:** Applicant data never enters an LLM context window.
 * **100% Determinism:** Evaluations are purely mathematical. This eliminates the catastrophic "recall risk" inherent to semantic RAG (Retrieval-Augmented Generation) approaches.
 * **Distributed Hot-Reloading:** Achieves zero-downtime policy updates across multiple API pods using Temporal.io and Redis Pub/Sub.
 * **Sub-Millisecond Latency:** API evaluations execute in O(1) time via a thread-safe, in-memory cache.
+* **Regulatory Compliance & Auditability:** This engine is designed specifically for RBI-regulated environments where a "Black Box" decision is unacceptable. 
 
+### The Audit Anchor
+Unlike standard LLM implementations that overwrite state, this system implements **Immutable Policy Versioning**:
+1. **Source of Truth:** Every time a policy is reloaded, the LLM-extracted rules are saved to PostgreSQL with a unique Version ID.
+2. **The Link:** Every `/evaluate` decision is logged in the `evaluations` table, creating a permanent foreign-key link to the specific policy version used.
+3. **Verification:** If a loan from 2025 is audited in 2026, the system can prove exactly which thresholds were active at the time of the decision.
+
+>So, I'm now handing over a system that solves the three biggest fears of a CTO:
+>
+>1. **Hallucinations** (Solved by the Deterministic Engine).
+>2. **Speed** (Solved by the In-Memory Cache).
+>3. **Auditors** (Solved by the Postgres Audit Trail).
 ---
 
 ## 2. System Architecture
@@ -19,30 +34,35 @@ The system utilizes a **CQRS (Command Query Responsibility Segregation)** patter
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant FastAPI (Eval API)
-    participant Redis Pub/Sub
-    participant Temporal
-    participant Ollama (Local LLM)
-    
-    %% Policy Reload Flow (Heavy Compute / Asynchronous)
-    Client->>FastAPI (Eval API): POST /policy/reload
-    FastAPI (Eval API)->>Temporal: Trigger ReloadPolicyWorkflow
-    FastAPI (Eval API)-->>Client: 202 Accepted (Async Processing)
-    
-    Temporal->>Ollama (Local LLM): Prompt: Extract JSON from policy.txt
-    Ollama (Local LLM)-->>Temporal: Return Validated JSON Rules
-    Temporal->>Redis Pub/Sub: PUBLISH 'policy_updates' event
-    
-    %% Cache Invalidation Sync (Distributed)
-    Redis Pub/Sub-->>FastAPI (Eval API): Broadcast 'policy_updates'
-    FastAPI (Eval API)->>FastAPI (Eval API): Update local threading.Lock() cache
-    
-    %% Evaluation Flow (Low Latency / Zero PII to LLM)
-    Client->>FastAPI (Eval API): POST /evaluate (Applicant JSON)
-    FastAPI (Eval API)->>FastAPI (Eval API): Compute Derived Fields (FOIR, Maturity Age)
-    FastAPI (Eval API)->>FastAPI (Eval API): Deterministic Evaluation vs Local Cache
-    FastAPI (Eval API)-->>Client: 200 OK (Decision & Explainability)
+    participant Client as Client (Loan Originator)
+    participant API as FastAPI Engine (Eval Pods)
+    participant Redis as Redis Pub/Sub (Hot Reload)
+    participant Temporal as Temporal.io
+    participant Ollama as Ollama (Llama3)
+    participant DB as PostgreSQL (Ground Truth)
+
+    Note over Client, API: Phase 1: Evaluation (0 PII to LLM)
+    Client->>API: POST /evaluate (Applicant JSON)
+    API->>API: Compute Pydantic Derivations (FOIR, Age)
+    API->>API: Execute Deterministic Rules vs. Local Cache
+    API->>DB: INSERT into evaluations (Audit Link)
+    API-->>Client: 200 OK (Decision & Explainability Payload)
+
+    Note over Client, Redis: Phase 2: Async Policy Hot-Reload
+    Client->>API: POST /policy/reload
+    API->>Temporal: Trigger 'ReloadPolicyWorkflow'
+    API-->>Client: 202 Accepted (Processing)
+
+    Note over Temporal, DB: Durable Execution (Temporal Worker)
+    Temporal->>Ollama: Activity: Compile Policy Text to Structured JSON
+    Ollama-->>Temporal: Returns Validated JSON Rules
+    Temporal->>DB: Activity: Persist Rules (Versioned & Immutable)
+    Temporal->>Redis: Activity: PUBLISH 'policy_updates' event
+
+    Note over Redis, API: Phase 3: Distributed State Sync
+    Redis-->>API: Broadcast 'policy_updates' event
+    API->>API: HOT-SWAP local memory cache safely (threading.Lock)
+    Note right of API: All distributed pods are now synchronized
 ```
 
 ### **High-Level Design Philosophy**
@@ -58,50 +78,61 @@ sequenceDiagram
 graph TD
     Client([Client / Loan Originator])
 
-    subgraph "Synchronous Evaluation Path (Low Latency)"
-        API[FastAPI: Policy Engine]
+    subgraph "Synchronous Layer (Privacy & O-1 Speed)"
+        API[FastAPI Engine: Evaluation Pods]
         MemCache[(In-Memory Rule Cache)]
-        API <-->|Read O-1| MemCache
-    end
-
-    subgraph "Asynchronous Orchestration Path (Heavy Compute)"
-        Temporal[Temporal.io Server]
-        Worker[Temporal Worker]
-        LLM[Ollama: Llama3]
-        DB[(PostgreSQL: Policy Source of Truth)]
+        API <-->|Read Rules O-1| MemCache
     end
 
     subgraph "Distributed Event Layer"
         Redis((Redis Pub/Sub))
     end
 
+    subgraph "Durable Persistence Layer (Regulatory Anchor)"
+        T_Server[Temporal.io Server]
+        W[Temporal Worker: Policy Compiler]
+        DB[(PostgreSQL: Audit Trail)]
+        Ollama[Ollama: Local Llama3]
+
+        W <-->|Prompt & Extract| Ollama
+        W -->|1. Save Policy Version| DB
+        W -->|2. Broadcast Invalidation| Redis
+    end
+
     %% Execution Flow
     Client -->|POST /evaluate<br/>Applicant JSON| API
     Client -.->|POST /policy/reload| API
-    API -- Trigger Workflow --> Temporal
+    API -->|Async Workflow Trigger| T_Server
+    API -->|INSERT Evaluation Log| DB
 
-    %% Orchestration Flow
-    Temporal -->|Durable Workflow| Worker
-    Worker <-->|Prompt: Extract to JSON| LLM
-    Worker -->|Persist New Ruleset| DB
-    Worker -->|Publish 'policy_updated'| Redis
-
-    %% Cache Invalidation
-    Redis -.->|Broadcast Event| API
-    API -.->|Fetch Latest Version| DB
+    %% Orchestration & Invalidation
+    T_Server -->|Workflow Orchestration| W
+    Redis -.->|'policy_updated' Event| API
     API -->|Acquire Lock & Update| MemCache
 
-    %% Styling
+    %% Styling for Presentation
     classDef primary fill:#0052cc,stroke:#fff,stroke-width:2px,color:#fff;
     classDef secondary fill:#ff9900,stroke:#fff,stroke-width:2px,color:#fff;
     classDef storage fill:#107c10,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef external fill:#444,stroke:#fff,stroke-width:2px,color:#fff;
 
     class API primary;
-    class LLM,Temporal,Worker secondary;
+    class T_Server,W primary;
+    class Ollama secondary;
     class DB,MemCache,Redis storage;
+    class Client external;
 ```
 
-> **Note to Harish:** 
+**Note to Harish:** 
+Our final architecture implements Command Query Responsibility Segregation (CQRS) using Temporal and Redis.
+
+1. The Synchronous Layer (blue/left) handles the live loan evaluations. It is O(1), hyper-fast, and PII-secure because it reads from an in-memory cache.
+
+2. The Asynchronous Layer (blue/right) handles the heavy compute of compiling the policy via the LLM.
+
+3. The Persistence Layer (green) solves the regulatory requirement. We anchor every decision and every rule version in Postgres to create an immutable audit trail.
+
+We sacrificed the simplicity of a single script to achieve the horizontal scalability and compliance rigor required by a Tier-1 NBFC.
 > Unlike a standard monolithic architecture where AI calls block the API, this system utilizes a **Distributed Invalidation Pattern**. 
 >
 > 1. **Evaluation (Read Path):** When a loan application arrives, the engine queries a local `threading.Lock()` protected cache. This yields sub-5ms latency and ensures that applicant PII is processed locally, never touching the LLM.
@@ -141,7 +172,12 @@ This system uses asynchronous orchestration to handle the heavy compute:
 >Why Postgres over other databases?
 >
 >ACID Compliance: Financial systems cannot afford "eventual consistency." When a policy is updated, it must be committed to the database immediately and reliably.
+>
 >Transactional Integrity: Temporal relies on heavy locking and transactions to ensure two workers don't try to "run" the same task at the exact same time. Postgres handles this concurrency better than NoSQL alternatives at this scale.
+>
+>Why didn't you go with an Asynchronous DB driver like asyncpg?
+>
+>While FastAPI supports async DB drivers, Temporal activities and SQLAlchemy's core ORM features are often more stable and easier to debug with the standard synchronous psycopg2 driver in a threaded worker environment. Given that our evaluation logic is deterministic and fast, the overhead of the synchronous database write for auditing is negligible compared to the reliability it provides for the regulatory trail.
 
 ---
 
@@ -255,6 +291,17 @@ curl -X POST "http://localhost:8000/policy/reload"
    ```
 5. The API is now available at: `http://localhost:8000/docs`
 
+>In a distributed system, the API and Worker will crash if they try to connect to Postgres before it has finished initializing its internal schemas. I have added a healthcheck to the Postgres service and used the service_healthy condition in the dependencies. I have also consolidated the environment variables into the .env file for cleaner orchestration.
+>
+>The Dockerfile file uses a multi-stage approach to keep the image slim while ensuring all C-extensions for psycopg2 are handled correctly.
+>
+>Process Isolation: Note that api and worker are defined as separate services. This allows the API to stay responsive while the Worker is potentially pegging the CPU during a heavy LLM parsing task.
+>
+>Healthchecks: The service_healthy condition on Postgres prevents "race condition" errors where the application tries to create audit tables before the database is actually ready to accept connections.
+>
+>Volume Persistence: ./ollama_data and postgres_data are persisted. This means if the containers are restarted, the Llama3 model doesn't need to be re-downloaded, and the Audit Trail remains intact.
+>
+>Harish, I avoided the naive approach of running migrations inside the main.py startup event. If the API scales to 10 replicas, you'd have 10 processes fighting to create the same tables. Instead, I implemented a prestart.sh entrypoint pattern. It ensures the database is fully reachable via netcat before any Python code executes, and it handles the schema sync as a blocking step before the web server begins accepting loan applications. This prevents 'partial state' errors in the cluster."
 ---
 
 ## 6. Testing Strategy

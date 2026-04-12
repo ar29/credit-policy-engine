@@ -1,5 +1,28 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Literal, Union, Any
+from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Float
+from sqlalchemy.ext.declarative import declarative_base
+import datetime
+
+# --- SQLAlchemy Models (Audit Trail) ---
+Base = declarative_base()
+
+class PolicyAudit(Base):
+    __tablename__ = "policies"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    version = Column(Integer, nullable=False)
+    rules_json = Column(JSON, nullable=False) # The [{rule_id, threshold...}] list
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class EvaluationAudit(Base):
+    __tablename__ = "evaluations"
+    id = Column(String, primary_key=True) # application_id
+    policy_version_id = Column(Integer, ForeignKey("policies.id"))
+    decision = Column(String)
+    final_foir = Column(Float)
+    evaluated_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+# --- Pydantic Schemas (API Contracts) ---
 
 class LoanRequest(BaseModel):
     amount: float = Field(..., gt=0)
@@ -51,3 +74,4 @@ class DecisionResponse(BaseModel):
     decision: Literal["APPROVED", "NEEDS_REVIEW", "REJECTED"]
     reason: str
     rules_evaluated: List[RuleResult]
+    policy_version: int

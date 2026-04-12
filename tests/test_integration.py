@@ -4,6 +4,7 @@ from unittest.mock import patch, AsyncMock, mock_open
 from app.main import app
 from app.models.schemas import RuleSchema
 from app.core.config import settings
+from app.core.state import policy_state
 
 # Initialize the synchronous TestClient for FastAPI
 client = TestClient(app)
@@ -26,6 +27,14 @@ MOCK_RULES = [
         operator="<=",
         threshold=50,
         severity="MEDIUM"
+    ),
+    RuleSchema(
+        rule_id="R-03",
+        rule_text="Age > 18",
+        field="age",
+        operator=">",
+        threshold=18,
+        severity="HIGH"
     )
 ]
 
@@ -117,3 +126,24 @@ def test_evaluate_fails_gracefully_when_no_rules_loaded():
         
         assert response.status_code == 503
         assert "Rules not loaded" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_includes_policy_version():
+    """Verify that the evaluation response includes the audit version ID."""
+    mock_rules = ]
+    
+    with patch.object(policy_state, "get_rules", return_value=MOCK_RULES), \
+         patch.object(policy_state, "get_current_policy_id", return_value=42), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        response = client.post("/evaluate", json={
+            "application_id": "APP-AUDIT-001",
+            "age": 25,
+            "monthly_income": 50000,
+            "credit_score": 750,
+            "loan_request": {"amount": 10000, "tenure_months": 12, "purpose": "test"}
+        })
+        
+        assert response.status_code == 200
+        assert response.json()["policy_version"] == 42

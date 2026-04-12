@@ -6,6 +6,31 @@ import redis
 from temporalio import workflow, activity
 from temporalio.client import Client
 from temporalio.worker import Worker
+from sqlalchemy import create_engine, desc
+from sqlalchemy.orm import sessionmaker
+from app.models.schemas import PolicyAudit, Base
+from app.core.config import settings
+
+# Setup Postgres Engine for the Worker
+engine = create_engine(f"postgresql://temporal:temporal@postgres:5432/temporal")
+SessionLocal = sessionmaker(bind=engine)
+
+@activity.defn
+async def persist_policy_to_db(rules: list) -> int:
+    """Saves the compiled ruleset to Postgres and returns the version ID."""
+    db = SessionLocal()
+    try:
+        # Get latest version
+        last_policy = db.query(PolicyAudit).order_by(desc(PolicyAudit.version)).first()
+        new_version = (last_policy.version + 1) if last_policy else 1
+        
+        new_policy = PolicyAudit(version=new_version, rules_json=rules)
+        db.add(new_policy)
+        db.commit()
+        db.refresh(new_policy)
+        return new_policy.id
+    finally:
+        db.close()
 
 @activity.defn
 async def extract_rules_from_llm(policy_text: str) -> list:
@@ -36,17 +61,23 @@ async def broadcast_new_rules(rules: list):
 class ReloadPolicyWorkflow:
     @workflow.run
     async def run(self, policy_text: str):
+        # 1. Compile via LLM
         rules_json = await workflow.execute_activity(
-            extract_rules_from_llm, 
-            policy_text, 
-            start_to_close_timeout=timedelta(minutes=3)
+            extract_rules_from_llm, policy_text, start_to_close_timeout=timedelta(minutes=3)
         )
+        
+        # 2. Anchor in Postgres (The Audit Trail)
+        policy_id = await workflow.execute_activity(
+            persist_policy_to_db, rules_json, start_to_close_timeout=timedelta(seconds=30)
+        )
+        
+        # 3. Broadcast to Redis for Hot-Reload
         await workflow.execute_activity(
             broadcast_new_rules, 
-            rules_json,
+            {"policy_id": policy_id, "rules": rules_json}, # Now includes the DB ID
             start_to_close_timeout=timedelta(seconds=10)
         )
-        return "Hot-Reload Complete."
+        return f"Hot-Reload Complete. Active Policy ID: {policy_id}"
 
 async def main():
     client = await Client.connect("temporal:7233")
