@@ -1,3 +1,5 @@
+# Prayaan Capital: Credit Policy Engine (SDI Architecture)
+
 ## 1. Executive Summary
 This project implements a highly scalable, deterministic Credit Policy Evaluation Engine designed for MSME lending in an RBI-regulated environment. 
 
@@ -411,15 +413,9 @@ async def trigger_reload():
     return {"status": "Reload workflow triggered. Listening for Redis invalidation."}
 ```
 
-This is exactly the right move. Trying to write End-to-End (E2E) tests that spin up an actual Temporal Server and an Ollama instance in a CI/CD pipeline is a recipe for flaky, 10-minute builds. 
-
-By writing an integration test that **mocks the Temporal client boundary**, we prove that our FastAPI application correctly orchestrates the background workflow without getting bogged down by the heavy infrastructure. 
-
-Here is the integration test suite utilizing `unittest.mock.AsyncMock`, followed by the complete, Principal-Engineer-level `README.md`.
-
 ---
 
-### **1. Integration Testing (Mocking Temporal)**
+#### **F. Integration Testing (Mocking Temporal)**
 
 Save this file as `tests/test_integration.py`. This test intercepts the outbound call to Temporal and the local file read, allowing the test to run in `<0.1 seconds`.
 
