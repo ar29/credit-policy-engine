@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path
 import asyncio
+from typing import List
 from temporalio.client import Client
 from app.core.state import policy_state
-from app.models.schemas import ApplicantPayload, DecisionResponse
+from app.core.config import settings
+from app.models.schemas import ApplicantPayload, DecisionResponse, RuleSchema
 from app.services.engine import DeterministicRuleEngine
 
 app = FastAPI(title="Prayaan Credit Engine")
@@ -18,6 +20,33 @@ async def evaluate(payload: ApplicantPayload):
     if not rules:
         raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
     return engine.evaluate(payload, rules)
+
+@app.get("/rules", response_model=List[RuleSchema])
+async def get_all_rules():
+    """
+    Returns the complete list of parsed rules currently active in the engine.
+    Fetches directly from the thread-safe O(1) memory cache.
+    """
+    rules = policy_state.get_rules()
+    if not rules:
+        raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
+    return rules
+
+@app.get("/rules/{rule_id}", response_model=RuleSchema)
+async def get_rule_by_id(rule_id: str = Path(..., description="The ID of the rule to fetch (e.g., R-01)")):
+    """
+    Returns the details of a specific rule.
+    """
+    rules = policy_state.get_rules()
+    if not rules:
+        raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
+    
+    # Simple linear search. If policy grows to 10k+ rules, we would index this in a dict.
+    for rule in rules:
+        if rule.rule_id == rule_id:
+            return rule
+            
+    raise HTTPException(status_code=404, detail=f"Rule with ID '{rule_id}' not found in active policy.")
 
 @app.post("/policy/reload", status_code=202)
 async def trigger_reload():

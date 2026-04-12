@@ -56,12 +56,13 @@ sequenceDiagram
 
 ---
 
-## 4. API Documentation
+## 4. API Documentation & Explainability
+
+**Explainability Mandate:** As per Requirement #7, the engine does not just return a binary decision. The `/evaluate` response payload includes a `rules_evaluated` array where *every single rule* outputs its `rule_text`, the evaluated `applicant_value`, and the required `threshold`.
 
 ### `POST /evaluate`
 Evaluates an applicant against the currently active policy cache.
-
-**Request Payload:**
+* **Request:** 
 ```bash
 curl -X POST "http://localhost:8000/evaluate" \
 -H "Content-Type: application/json" \
@@ -81,7 +82,7 @@ curl -X POST "http://localhost:8000/evaluate" \
 }'
 ```
 
-**Response Payload (Explainability included):**
+* **Response:**
 ```json
 {
   "application_id": "APP-2024-00192",
@@ -98,6 +99,32 @@ curl -X POST "http://localhost:8000/evaluate" \
   ]
 }
 ```
+
+### `GET /rules`
+Returns the list of all rules currently compiled and active in the engine's memory.
+* **Response:** `200 OK`
+```json
+[
+  {
+    "rule_id": "R-01",
+    "rule_text": "Applicants with loan amount > 2,50,000 must have a credit score of at least 700.",
+    "field": "credit_score",
+    "operator": ">=",
+    "threshold": 700,
+    "severity": "HIGH"
+  }
+]
+```
+
+### `GET /rules/{rule_id}`
+Returns the exact schema details of a specific rule.
+* **Path Parameter:** `rule_id` (e.g., `R-01`)
+* **Response:** `200 OK` (Returns single Rule Object) or `404 Not Found`.
+
+---
+
+*Harish, I added the `GET /rules` endpoints as requested. Currently, it performs a linear search across the array in the in-memory cache. For the 20-50 rules in this assignment, that executes in microseconds. However, if Prayaan eventually scales to thousands of micro-rules across different state geographies, I would refactor the `DistributedPolicyState` singleton to store rules in a Hash Map (Dictionary) keyed by `rule_id` to guarantee O(1) lookup times for the `GET /rules/{rule_id}` endpoint.*
+
 
 ### `POST /policy/reload`
 Triggers the asynchronous Temporal workflow to re-parse `/data/policy.txt` via Ollama.
@@ -149,6 +176,18 @@ To guarantee compliance and enterprise rigor, the testing strategy is bifurcated
 pip install -r requirements.txt
 pytest tests/ -v
 ```
+The test suite is designed for high-confidence local execution without requiring a live LLM or Temporal server.
+
+* **Unit Tests (`tests/test_engine.py`):** Mathematically validates FOIR and Maturity Age derivations.
+* **Schema Tests (`tests/test_schemas.py`):** Ensures Pydantic V2 strictly enforces the evaluation contract.
+* **Integration Tests (`tests/test_integration.py`):** * Mocks the **Temporal Client** to verify asynchronous workflow dispatching.
+    * Mocks the **Policy State** to verify that the `GET /rules` and `GET /rules/{rule_id}` endpoints correctly serve compiled logic and handle "Not Found" or "Service Unavailable" states gracefully.
+
+Why are you mocking the rules in the integration test instead of just calling /policy/reload and then checking /rules?
+
+My Response -
+
+That would be an End-to-End (E2E) test. While valuable, E2E tests are slow and non-deterministic because they depend on the LLM's response time. By mocking the policy_state, I am performing Contract Testing. I am verifying that as long as the state contains valid rules, the API correctly delivers them. This allows us to run 50+ tests in under 1 second, ensuring a fast and reliable CI/CD pipeline.
 
 ---
 

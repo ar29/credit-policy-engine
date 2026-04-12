@@ -2,10 +2,72 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, mock_open
 from app.main import app
-from app.core.config import settings # <-- 1. Import our dynamic settings
+from app.models.schemas import RuleSchema
+from app.core.config import settings
 
 # Initialize the synchronous TestClient for FastAPI
 client = TestClient(app)
+
+
+# Test Data: A mock compiled policy
+MOCK_RULES = [
+    RuleSchema(
+        rule_id="R-01",
+        rule_text="Credit score >= 700",
+        field="credit_score",
+        operator=">=",
+        threshold=700,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-02",
+        rule_text="FOIR <= 50",
+        field="foir",
+        operator="<=",
+        threshold=50,
+        severity="MEDIUM"
+    )
+]
+
+def test_get_all_rules_success():
+    """
+    Test that /rules returns the full list when the cache is populated.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        response = client.get("/rules")
+        assert response.status_code == 200
+        assert len(response.json()) == 2
+        assert response.json()[0]["rule_id"] == "R-01"
+
+def test_get_specific_rule_success():
+    """
+    Test that /rules/{rule_id} returns the correct rule detail.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        # Case: Rule exists
+        response = client.get("/rules/R-02")
+        assert response.status_code == 200
+        assert response.json()["field"] == "foir"
+        assert response.json()["severity"] == "MEDIUM"
+
+def test_get_specific_rule_not_found():
+    """
+    Test the 404 boundary when a non-existent rule_id is requested.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        # Case: Rule ID does not exist in the mock list
+        response = client.get("/rules/R-99")
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"]
+
+def test_rules_endpoints_fail_when_cache_empty():
+    """
+    Test the 503 boundary when the system is fresh and no policy has been loaded.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=[]):
+        response = client.get("/rules")
+        assert response.status_code == 503
+        assert "Rules not loaded" in response.json()["detail"]
 
 @patch("app.main.Client.connect", new_callable=AsyncMock)
 @patch("builtins.open", new_callable=mock_open, read_data="Rule R-01: FOIR <= 50")
