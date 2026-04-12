@@ -26,6 +26,57 @@ Unlike standard LLM implementations that overwrite state, this system implements
 >1. **Hallucinations** (Solved by the Deterministic Engine).
 >2. **Speed** (Solved by the In-Memory Cache).
 >3. **Auditors** (Solved by the Postgres Audit Trail).
+
+---
+
+As you review the codebase, you will notice a glaring omission of a technology that is standard in most GenAI portfolios today: **Retrieval-Augmented Generation (RAG)** and **Vector Databases**.
+
+I want to explicitly outline my design rationale for omitting RAG, as this was a deliberate choice to align with your mandate for **Outcome Accuracy** and **Enterprise Rigor** in an RBI-regulated environment.
+
+
+### **The Core Thesis: RAG is Non-Deterministic; Compliance is Binary**
+
+The current industry reflex is to chunk policy documents, store them in a Vector DB, and at runtime, embed the applicant's profile to retrieve "relevant" rules to feed into an LLM prompt. For an NBFC credit engine, this introduces catastrophic risks:
+
+* **Retrieval Misses (The Recall Problem):** Semantic search is probabilistic. If an applicant's JSON doesn't trigger high semantic similarity with a critical systemic rule (e.g., a blanket negative industry list), the Vector DB won't retrieve it. The LLM will then approve a loan that violates core policy simply because the rule was "forgotten" in the retrieval phase. In credit decisioning, **99% recall is a systemic failure**.
+* **PII Contamination:** Runtime RAG requires sending the applicant's data (income, age, credit score) into the LLM context window alongside the retrieved rules. This violates **Requirement #8** (Zero PII exposure to the LLM) and introduces severe data sovereignty risks.
+* **Runtime Latency:** Evaluating a loan via RAG requires an embedding call, a vector search, and a generative LLM inference step. This turns a 2-millisecond API request into a 15-second bottleneck.
+
+### **The Solution: The LLM as an "Offline Compiler"**
+
+Instead of using the LLM as a runtime interpreter, this architecture uses it as an **offline compiler**.
+
+1.  During the `/policy/reload` workflow, the LLM reads the entire document and "compiles" the natural language into a **strict, deterministic JSON Rule Array**.
+2.  At runtime (`/evaluate`), the system uses **pure Python logic** against this cached JSON.
+
+
+### **The Tradeoff Matrix**
+
+While this "Offline Compilation + Deterministic Engine" approach guarantees compliance, I want to be transparent about the architectural tradeoffs:
+
+| Feature | The RAG Approach | This Architecture (SDI / Compiler) |
+| :--- | :--- | :--- |
+| **Determinism** | **Low:** LLMs may creatively interpret or ignore retrieved rules. | **Absolute:** Python operators ($<, >, ==$) never hallucinate. |
+| **Latency** | **High:** ~5–15 seconds per loan application. | **Minimal:** < 5 milliseconds per application ($O(1)$ local cache read). |
+| **Auditability** | **Poor:** "The LLM decided it was okay based on chunk #4." | **Perfect:** Every evaluation returns the exact threshold, applicant value, and rule ID. |
+| **Flexibility** | **High:** Can handle vague, unstructured applicant data via natural language. | **Rigid:** Requires API payload to match Pydantic schema. Unmapped fields require code updates. |
+| **Context Limits** | **Infinite:** Vector DBs handle massive document corpora. | **Constrained:** Policy must fit within the LLM context window during reload (modern 128k windows handle this easily). |
+
+---
+
+### **Conclusion**
+
+By sacrificing the "flexibility" of letting an LLM hallucinate credit decisions, we achieve a system that is mathematically provable, completely private, and highly performant. This is the exact application of the **Smart Data Injection (SDI)** pattern—the LLM provides the structured context, but the engine executes the live data.
+
+Let me know if you’d like to debate this further during the presentation on the 15th.
+
+---
+
+> **Note: The Counter-Attack**
+> *You might read this and ask: "Okay, but what if the policy doc is 500 pages long and exceeds the context window? How do you compile it then?"*
+>
+> **My Defense:**
+> If the policy is 500 pages, we use a **Map-Reduce compilation strategy** during the Temporal workflow. We chunk the document, have the LLM extract JSON rules from each chunk in parallel, and then map them into a single aggregate JSON cache. The evaluation API remains completely unaffected and lightning-fast.
 ---
 
 ## 2. System Architecture
@@ -352,40 +403,46 @@ This separation allows for **Independent Scaling**: in a high-load scenario, we 
 
 ```text
 prayaan-engine/
-│
 ├── app/
-│   ├── __init__.py                 # Required for pytest pathing
-│   ├── main.py                     # FastAPI application & endpoints
+│   ├── __init__.py                 # Enables module-level imports
+│   ├── main.py                     # FastAPI entrypoint, routes, & audit logging
 │   ├── core/
 │   │   ├── __init__.py
-│   │   ├── config.py               # Pydantic-settings configuration loader
-│   │   └── state.py                # Redis Pub/Sub & thread-safe singleton
+│   │   ├── config.py               # Pydantic-Settings (12-Factor config)
+│   │   └── state.py                # Redis Pub/Sub & Thread-safe Rule Cache
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── schemas.py              # Pydantic V2 schemas & derived field logic
+│   │   └── schemas.py              # Pydantic (API) & SQLAlchemy (Postgres) models
 │   └── services/
 │       ├── __init__.py
-│       └── engine.py               # Deterministic rule evaluation logic
-│
-├── data/
-│   └── policy.txt                  # The raw natural language policy document
-│
-├── tests/                          # Bifurcated test suite
-│   ├── __init__.py                 # Required for pytest test discovery
-│   ├── test_engine.py              # Mathematical bounds testing (TDD)
-│   ├── test_integration.py         # Temporal mocked integration tests
-│   └── test_schemas.py             # Pydantic validation & derivation tests
-│
+│       └── engine.py               # Deterministic O(1) Evaluation Logic
 ├── worker/
 │   ├── __init__.py
-│   └── policy_workflow.py          # Temporal workflow & Ollama LLM extraction
-│
-├── .env.example                    # Template for environment variables (12-Factor)
-├── docker-compose.yml              # Infrastructure orchestration (Redis, Temporal, Ollama, API)
-├── pytest.ini                      # Solves the sys.path ModuleNotFoundError
+│   └── policy_workflow.py          # Temporal Workflow, Activities, & LLM Extraction
+├── tests/
+│   ├── __init__.py
+│   ├── test_engine.py              # Unit tests: Mathematical boundary conditions
+│   ├── test_schemas.py             # Unit tests: Derived field logic (FOIR/Age)
+│   └── test_integration.py         # Integration: Mocked Temporal & API contracts
+├── data/
+│   └── policy.txt                  # Natural language policy document
+├── .env.example                    # Environment template (No secrets committed)
+├── .gitignore                      # Standard Python & Docker ignores
+├── Dockerfile                      # Optimized multi-process image
+├── docker-compose.yml              # Orchestration (Postgres, Redis, Temporal, Ollama)
+├── prestart.sh                     # Migration coordinator & service wait-loop
+├── pytest.ini                      # Global test configuration & pathing
 ├── README.md                       # Architecture Decision Record (ADR)
-└── requirements.txt                # Dependency locking
+└── requirements.txt                # Locked dependency manifest
 ```
+
+>The prestart.sh Anchor: This script prevents the API from starting until the Postgres database is healthy and migrations are complete. It solves the "race condition" common in distributed deployments.
+>
+>Bifurcated Models: By keeping SQLAlchemy (Persistence) and Pydantic (Validation) in the same models/ directory, I've created a single source of truth for the Data Contract.
+>
+>Process-Isolated Worker: Note that the worker/ directory is logically separated. While it shares the models, its execution context is entirely different, allowing us to scale our "Policy Compilers" independently from our "Loan Evaluators."
+>
+>Harish, I've centralized all infrastructure secrets and hostnames into a Pydantic-Settings model. This allows us to maintain Environment Parity. In the local docker-compose, the hosts are set to redis and postgres, but if we move to AWS, we can simply point the environment variables to an ElastiCache endpoint or an RDS instance without changing a single line of application code. Furthermore, my integration tests dynamically validate against these settings, ensuring that our test environment is always an exact mirror of our runtime configuration.
 
 #### **A. The Models & Contracts (`app/models/schemas.py`)**
 ```python

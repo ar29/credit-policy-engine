@@ -1,8 +1,16 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 class Settings(BaseSettings):
+    app_name: str = "Prayaan Credit Engine"
     app_env: str = "development"
     log_level: str = "INFO"
+
+    # Database (Postgres)
+    database_url: str = Field(
+        default="postgresql://temporal:temporal@postgres:5432/temporal",
+        validation_alias="DATABASE_URL"
+    )
     
     # Redis
     redis_host: str = "localhost"

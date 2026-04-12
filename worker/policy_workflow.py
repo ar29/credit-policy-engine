@@ -12,7 +12,7 @@ from app.models.schemas import PolicyAudit, Base
 from app.core.config import settings
 
 # Setup Postgres Engine for the Worker
-engine = create_engine(f"postgresql://temporal:temporal@postgres:5432/temporal")
+engine = create_engine(settings.database_url)
 SessionLocal = sessionmaker(bind=engine)
 
 @activity.defn

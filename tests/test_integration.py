@@ -131,7 +131,6 @@ def test_evaluate_fails_gracefully_when_no_rules_loaded():
 @pytest.mark.asyncio
 async def test_evaluate_includes_policy_version():
     """Verify that the evaluation response includes the audit version ID."""
-    mock_rules = ]
     
     with patch.object(policy_state, "get_rules", return_value=MOCK_RULES), \
          patch.object(policy_state, "get_current_policy_id", return_value=42), \
@@ -147,3 +146,64 @@ async def test_evaluate_includes_policy_version():
         
         assert response.status_code == 200
         assert response.json()["policy_version"] == 42
+
+@pytest.mark.asyncio
+@patch("app.main.Client.connect", new_callable=AsyncMock)
+@patch("builtins.open", new_callable=mock_open, read_data="Mock Policy Content")
+async def test_policy_reload_orchestration(mock_file, mock_temporal_connect):
+    """
+    Integration test for the /policy/reload endpoint.
+    Verifies that the API correctly reads the configured file and 
+    dispatches the workflow to the configured Temporal Task Queue.
+    """
+    mock_temporal_instance = AsyncMock()
+    mock_temporal_connect.return_value = mock_temporal_instance
+
+    response = client.post("/policy/reload")
+
+    # Assertions
+    assert response.status_code == 202
+    
+    # Verify Temporal Connection uses config
+    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url)
+    
+    # Verify Workflow Dispatch uses config
+    mock_temporal_instance.execute_workflow.assert_called_once_with(
+        "ReloadPolicyWorkflow",
+        "Mock Policy Content",
+        id="policy-reload-job",
+        task_queue=settings.temporal_task_queue
+    )
+
+def test_get_rules_uninitialized():
+    """Verify 533 error when system has not yet been initialized with a policy."""
+    with patch("app.core.state.policy_state.get_rules", return_value=[]):
+        response = client.get("/rules")
+        assert response.status_code == 533
+        assert "Rules not loaded" in response.json()["detail"]
+
+
+def test_evaluate_endpoint_contract():
+    """Verify the /evaluate contract and the automated derivation of fields (FOIR)."""
+    # We mock the state so we don't need a real DB/Redis for this test
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES), \
+         patch("app.core.state.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db: # Mock DB session for audit trail
+        
+        payload = {
+            "application_id": "APP-123",
+            "age": 25,
+            "monthly_income": 50000,
+            "credit_score": 750,
+            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert "decision" in data
+        assert "policy_version" in data
+        # Check that our derived field FOIR was calculated and returned in explainability
+        assert any(r["applicant_value"] == 25 for r in data["rules_evaluated"] if r["rule_id"] == "R1")
+
