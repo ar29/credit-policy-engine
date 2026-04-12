@@ -1,0 +1,4 @@
+Policy Document: MSME Express Loan
+Rule R-01 [HIGH]: Applicants with loan amount > 2,50,000 must have a credit_score of at least 700.
+Rule R-02 [MEDIUM]: foir must not exceed 50.
+Rule R-03 [HIGH]: loan_maturity_age must be <= 65.
