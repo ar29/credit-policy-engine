@@ -139,7 +139,7 @@ This system uses asynchronous orchestration to handle the heavy compute:
 * **Why No RAG / Vector DB:** Semantic retrieval introduces non-deterministic recall risk. If a Vector DB fails to retrieve a critical compliance rule due to low semantic similarity, the engine will illegally approve a loan. By using the LLM as an **offline compiler** rather than a runtime interpreter, we guarantee 100% compliance.
 * **Postgres Database** 
 >Why Postgres over other databases?
->In your conversation with Harish, you can justify using Postgres for Temporal for the following reasons:
+>
 >ACID Compliance: Financial systems cannot afford "eventual consistency." When a policy is updated, it must be committed to the database immediately and reliably.
 >Transactional Integrity: Temporal relies on heavy locking and transactions to ensure two workers don't try to "run" the same task at the exact same time. Postgres handles this concurrency better than NoSQL alternatives at this scale.
 
