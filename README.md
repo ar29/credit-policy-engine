@@ -159,7 +159,7 @@ pytest tests/ -v
 ---
 
 
-## 8. The Core Codebase**
+## 8. The Core Codebase
 
 ```text
 prayaan-engine/
