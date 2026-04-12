@@ -137,6 +137,11 @@ This system uses asynchronous orchestration to handle the heavy compute:
 * **Temporal.io:** Local LLMs (Ollama) are resource-intensive and prone to hallucination/timeouts. Temporal guarantees durable execution, retrying the LLM parsing until a valid schema is generated. This ensures API stability.
 * **Redis Pub/Sub:** Enables safe, instantaneous cache-invalidation. When Temporal successfully compiles a new policy, Redis broadcasts the payload so all FastAPI pods update simultaneously.
 * **Why No RAG / Vector DB:** Semantic retrieval introduces non-deterministic recall risk. If a Vector DB fails to retrieve a critical compliance rule due to low semantic similarity, the engine will illegally approve a loan. By using the LLM as an **offline compiler** rather than a runtime interpreter, we guarantee 100% compliance.
+* **Postgres Database** 
+>Why Postgres over other databases?
+>In your conversation with Harish, you can justify using Postgres for Temporal for the following reasons:
+>ACID Compliance: Financial systems cannot afford "eventual consistency." When a policy is updated, it must be committed to the database immediately and reliably.
+>Transactional Integrity: Temporal relies on heavy locking and transactions to ensure two workers don't try to "run" the same task at the exact same time. Postgres handles this concurrency better than NoSQL alternatives at this scale.
 
 ---
 
@@ -284,7 +289,19 @@ That would be an End-to-End (E2E) test. While valuable, E2E tests are slow and n
 ---
 
 
-## 8. The Core Codebase
+## 8. Deployment & Process Isolation
+
+The system is containerized using a single **optimized Docker Image**, but deployed as two distinct microservices:
+
+1.  **Evaluator Service (API):** Optimized for low-latency HTTP traffic. It maintains the in-memory rule cache and executes deterministic logic.
+2.  **Orchestrator Service (Worker):** Isolated from the API to prevent "CPU Starvation." It handles the resource-intensive LLM extraction tasks and communicates with Ollama.
+
+This separation allows for **Independent Scaling**: in a high-load scenario, we can scale the Evaluator pods to handle thousands of requests per second without needing to scale the heavy LLM-processing workers.
+
+* You might ask: "Why not two different Dockerfiles?"
+* My Response - At this stage, a single Dockerfile keeps our CI/CD pipeline simple and ensures that both the API and the Worker are always running on the exact same version of the Pydantic schemas. It prevents 'Schema Drift' between the service that parses the rules and the service that evaluates them.
+
+## 9. The Core Codebase
 
 ```text
 prayaan-engine/
