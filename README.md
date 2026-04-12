@@ -45,6 +45,74 @@ sequenceDiagram
     FastAPI (Eval API)-->>Client: 200 OK (Decision & Explainability)
 ```
 
+### **High-Level Design Philosophy**
+* **Separation of Concerns:** The "Smart Data Injection" (SDI) philosophy is maintained by keeping PII in the synchronous path and using the LLM purely as an offline compiler in the asynchronous path.
+* **Durable Execution:** Temporal ensures that if the LLM (Ollama) times out or fails during a policy reload, the system retries gracefully without user intervention.
+* **Event-Driven Sync:** Redis Pub/Sub ensures that horizontal scaling is possible; as soon as one worker updates the rules, all API pods are notified to refresh their local cache.
+
+---
+
+### **System Architecture Diagram (Mermaid)**
+
+```mermaid
+graph TD
+    Client([Client / Loan Originator])
+
+    subgraph "Synchronous Evaluation Path (Low Latency)"
+        API[FastAPI: Policy Engine]
+        MemCache[(In-Memory Rule Cache)]
+        API <-->|Read O-1| MemCache
+    end
+
+    subgraph "Asynchronous Orchestration Path (Heavy Compute)"
+        Temporal[Temporal.io Server]
+        Worker[Temporal Worker]
+        LLM[Ollama: Llama3]
+        DB[(PostgreSQL: Policy Source of Truth)]
+    end
+
+    subgraph "Distributed Event Layer"
+        Redis((Redis Pub/Sub))
+    end
+
+    %% Execution Flow
+    Client -->|POST /evaluate<br/>Applicant JSON| API
+    Client -.->|POST /policy/reload| API
+    API -- Trigger Workflow --> Temporal
+
+    %% Orchestration Flow
+    Temporal -->|Durable Workflow| Worker
+    Worker <-->|Prompt: Extract to JSON| LLM
+    Worker -->|Persist New Ruleset| DB
+    Worker -->|Publish 'policy_updated'| Redis
+
+    %% Cache Invalidation
+    Redis -.->|Broadcast Event| API
+    API -.->|Fetch Latest Version| DB
+    API -->|Acquire Lock & Update| MemCache
+
+    %% Styling
+    classDef primary fill:#0052cc,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef secondary fill:#ff9900,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef storage fill:#107c10,stroke:#fff,stroke-width:2px,color:#fff;
+
+    class API primary;
+    class LLM,Temporal,Worker secondary;
+    class DB,MemCache,Redis storage;
+```
+
+> **Note to Harish:** > Unlike a standard monolithic architecture where AI calls block the API, this system utilizes a **Distributed Invalidation Pattern**. 
+>
+> 1. **Evaluation (Read Path):** When a loan application arrives, the engine queries a local `threading.Lock()` protected cache. This yields sub-5ms latency and ensures that applicant PII is processed locally, never touching the LLM.
+> 2. **Reload (Write Path):** When the policy document changes, a Temporal workflow manages the extraction. This is a "heavy" task that runs in the background. 
+> 3. **The Synchronization Hook:** We use **Redis Pub/Sub** to solve the "Distributed Cache" problem. Instead of each API pod polling a database, the Temporal worker broadcasts a signal. All active FastAPI pods receive this signal and update their local memory caches simultaneously, ensuring version consistency across the entire cluster.
+
+---
+
+### **Calculated Assumption: Why not a simple Webhook?**
+While a webhook would work, **Temporal** was chosen because it provides a **State Machine** for the LLM extraction. If the LLM generates malformed JSON, the Temporal Activity fails, and the system can be configured to "Wait-and-Retry" or alert an admin, whereas a simple webhook would silently fail or require complex manual retry logic.
+
+
 ## 2.a Updated Architecture & Design Rationale
 
 The design is built around the **CQRS (Command Query Responsibility Segregation)** pattern. We separate the computationally heavy Write path (Hot-Reloading) from the ultra-fast Read path (Evaluation).
