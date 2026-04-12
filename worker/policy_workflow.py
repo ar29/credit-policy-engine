@@ -16,8 +16,10 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     Output ONLY valid JSON. No markdown wrappers.
     """
     async with httpx.AsyncClient(timeout=120.0) as client:
-        res = await client.post("http://ollama:11434/api/generate", json={
-            "model": "llama3",
+        from app.core.config import settings
+
+        res = await client.post(settings.ollama_base_url, json={
+            "model": settings.ollama_model,
             "prompt": prompt,
             "format": "json",
             "stream": False

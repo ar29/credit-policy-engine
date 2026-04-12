@@ -21,11 +21,13 @@ async def evaluate(payload: ApplicantPayload):
 
 @app.post("/policy/reload", status_code=202)
 async def trigger_reload():
-    with open("data/policy.txt", "r") as f:
+    from app.core.config import settings
+
+    with open(settings.policy_file_path, "r") as f:
         text = f.read()
-    
+
     try:
-        client = await Client.connect("temporal:7233")
+        client = await Client.connect(settings.temporal_server_url)
         await client.execute_workflow(
             "ReloadPolicyWorkflow",
             text,

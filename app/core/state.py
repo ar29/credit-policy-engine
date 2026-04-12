@@ -3,6 +3,8 @@ import json
 import redis.asyncio as redis
 from typing import List
 from app.models.schemas import RuleSchema
+from app.core.config import settings
+
 
 class DistributedPolicyState:
     _instance = None
@@ -15,7 +17,10 @@ class DistributedPolicyState:
                     cls._instance = super().__new__(cls)
                     cls._instance.rules: List[RuleSchema] = []
                     cls._instance._rw_lock = threading.Lock()
-                    cls._instance.redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+                    cls._instance.redis_client = redis.Redis(host=settings.redis_host, 
+                                                             port=settings.redis_port, 
+                                                             db=settings.redis_db,
+                                                             decode_responses=True)
         return cls._instance
 
     def get_rules(self) -> List[RuleSchema]:

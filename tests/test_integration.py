@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, mock_open
 from app.main import app
+from app.core.config import settings # <-- 1. Import our dynamic settings
 
 # Initialize the synchronous TestClient for FastAPI
 client = TestClient(app)
@@ -25,15 +26,16 @@ async def test_policy_reload_triggers_temporal_workflow(mock_file, mock_temporal
     assert response.status_code == 202
     assert response.json()["status"] == "Reload workflow triggered safely."
 
-    # 4. Assert the Temporal Client connected to the right host
-    mock_temporal_connect.assert_called_once_with("temporal:7233")
+    # 4. Assert the Temporal Client connected to the configured host
+    # <-- 2. Update this assertion to use the dynamic setting instead of a hardcoded string
+    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url) 
 
     # 5. Assert the workflow was dispatched with the correct parameters
     mock_temporal_client_instance.execute_workflow.assert_called_once_with(
         "ReloadPolicyWorkflow",
         "Rule R-01: FOIR <= 50", # Matches our mocked file data
         id="policy-reload-job",
-        task_queue="policy-queue"
+        task_queue=settings.temporal_task_queue # <-- Make sure this matches config too
     )
 
 def test_evaluate_fails_gracefully_when_no_rules_loaded():
@@ -47,6 +49,7 @@ def test_evaluate_fails_gracefully_when_no_rules_loaded():
             "age": 30,
             "monthly_income": 50000,
             "credit_score": 750,
+            "existing_emi_obligations": 0,
             "loan_request": {"amount": 100000, "tenure_months": 12, "purpose": "capital"}
         })
         
