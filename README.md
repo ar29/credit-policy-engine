@@ -101,7 +101,8 @@ graph TD
     class DB,MemCache,Redis storage;
 ```
 
-> **Note to Harish:** > Unlike a standard monolithic architecture where AI calls block the API, this system utilizes a **Distributed Invalidation Pattern**. 
+> **Note to Harish:** 
+> Unlike a standard monolithic architecture where AI calls block the API, this system utilizes a **Distributed Invalidation Pattern**. 
 >
 > 1. **Evaluation (Read Path):** When a loan application arrives, the engine queries a local `threading.Lock()` protected cache. This yields sub-5ms latency and ensures that applicant PII is processed locally, never touching the LLM.
 > 2. **Reload (Write Path):** When the policy document changes, a Temporal workflow manages the extraction. This is a "heavy" task that runs in the background. 
