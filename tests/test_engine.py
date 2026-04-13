@@ -10,6 +10,8 @@ def test_engine_rejects_high_severity():
         "monthly_income": 50000,
         "existing_emi_obligations": 0,
         "credit_score": 650,
+        "annual_turnover": 2000000,      # NEW: Required
+        "business_vintage_months": 24,   # NEW: Required
         "loan_request": {"amount": 300000, "tenure_months": 36, "purpose": "capital"}
     })
     
@@ -39,6 +41,8 @@ def test_engine_needs_review_medium_severity():
         "monthly_income": 50000,
         "existing_emi_obligations": 30000, # Massive existing debt
         "credit_score": 750,
+        "annual_turnover": 2000000,      # NEW: Required
+        "business_vintage_months": 24,   # NEW: Required
         "loan_request": {"amount": 100000, "tenure_months": 12, "purpose": "capital"}
     })
     

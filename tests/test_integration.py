@@ -66,6 +66,16 @@ MSME_MOCK_RULES = [
     )
 ]
 
+BASE_MSME_PAYLOAD = {
+    "application_id": "APP-123",
+    "age": 25,
+    "monthly_income": 50000,
+    "credit_score": 750,
+    "annual_turnover": 1500000,      # Added for MSME Schema
+    "business_vintage_months": 24,   # Added for MSME Schema
+    "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
+}
+
 def test_get_all_rules_success():
     """
     Test that /rules returns the full list when the cache is populated.
@@ -218,15 +228,7 @@ def test_evaluate_endpoint_contract():
          patch("app.main.policy_state.get_current_policy_id", return_value=1), \
          patch("app.main.SessionLocal") as mock_db: # Mock DB session for audit trail
         
-        payload = {
-            "application_id": "APP-123",
-            "age": 25,
-            "monthly_income": 50000,
-            "credit_score": 750,
-            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
-        }
-        
-        response = client.post("/evaluate", json=payload)
+        response = client.post("/evaluate", json=BASE_MSME_PAYLOAD) # Use full payload
         
         assert response.status_code == 200
         data = response.json()

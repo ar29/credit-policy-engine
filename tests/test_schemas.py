@@ -8,6 +8,8 @@ def test_derived_fields_computation():
         "monthly_income": 100000.0,
         "existing_emi_obligations": 10000.0,
         "credit_score": 750,
+        "annual_turnover": 2000000.0,    # Added
+        "business_vintage_months": 36,   # Added
         "loan_request": {
             "amount": 500000.0,
             "tenure_months": 24,

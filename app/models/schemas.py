@@ -39,6 +39,8 @@ class ApplicantPayload(BaseModel):
     co_applicant_score: Optional[int] = None
     loan_request: LoanRequest
     industry_type: str = "others"
+    effective_cibil_threshold: int = 700
+    credit_eligibility_score: int = 0
 
     # Virtual fields for the engine to target
     credit_eligibility_score: int = 0
