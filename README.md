@@ -539,7 +539,7 @@ OPERATORS = {
 }
 
 class DeterministicRuleEngine:
-    def evaluate(self, applicant: ApplicantPayload, rules: List[RuleSchema]) -> DecisionResponse:
+    def evaluate(self, applicant: ApplicantPayload, rules: List[RuleSchema], policy_id: int) -> DecisionResponse:
         results = []
         failed_high = 0
         failed_medium = 0
@@ -577,7 +577,8 @@ class DeterministicRuleEngine:
             application_id=applicant.application_id,
             decision=decision,
             reason=reason,
-            rules_evaluated=results
+            rules_evaluated=results,
+            policy_version=policy_id
         )
 ```
 
@@ -588,20 +589,32 @@ import json
 import redis.asyncio as redis
 from typing import List
 from app.models.schemas import RuleSchema
+from app.core.config import settings
+
 
 class DistributedPolicyState:
     _instance = None
     _lock = threading.Lock()
+
+    def __init__(self):
+        self.rules = []
+        self.current_policy_id = None
+        self._rw_lock = threading.Lock()
+
+    def get_current_policy_id(self):
+        return self.current_policy_id
 
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance.rules: List[RuleSchema] = []
+                    cls._instance.rules = []
                     cls._instance._rw_lock = threading.Lock()
-                    # In a real environment, load Redis host from ENV
-                    cls._instance.redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+                    cls._instance.redis_client = redis.Redis(host=settings.redis_host, 
+                                                             port=settings.redis_port, 
+                                                             db=settings.redis_db,
+                                                             decode_responses=True)
         return cls._instance
 
     def get_rules(self) -> List[RuleSchema]:
@@ -616,6 +629,7 @@ class DistributedPolicyState:
                 new_rules_data = json.loads(message["data"])
                 with self._rw_lock:
                     self.rules = [RuleSchema(**r) for r in new_rules_data]
+                    self.current_policy_id = new_rules_data["policy_id"] # Synchronize the ID
                 print(f"State Synced: {len(self.rules)} rules hot-reloaded.")
 
 policy_state = DistributedPolicyState()
@@ -623,11 +637,39 @@ policy_state = DistributedPolicyState()
 
 #### **D. The Temporal Workflow (`worker/policy_workflow.py`)**
 ```python
-from temporalio import workflow, activity
+import asyncio
 from datetime import timedelta
 import httpx
 import json
 import redis
+from temporalio import workflow, activity
+from temporalio.client import Client
+from temporalio.worker import Worker
+from sqlalchemy import create_engine, desc
+from sqlalchemy.orm import sessionmaker
+from app.models.schemas import PolicyAudit, Base
+from app.core.config import settings
+
+# Setup Postgres Engine for the Worker
+engine = create_engine(settings.database_url)
+SessionLocal = sessionmaker(bind=engine)
+
+@activity.defn
+async def persist_policy_to_db(rules: list) -> int:
+    """Saves the compiled ruleset to Postgres and returns the version ID."""
+    db = SessionLocal()
+    try:
+        # Get latest version
+        last_policy = db.query(PolicyAudit).order_by(desc(PolicyAudit.version)).first()
+        new_version = (last_policy.version + 1) if last_policy else 1
+        
+        new_policy = PolicyAudit(version=new_version, rules_json=rules)
+        db.add(new_policy)
+        db.commit()
+        db.refresh(new_policy)
+        return new_policy.id
+    finally:
+        db.close()
 
 @activity.defn
 async def extract_rules_from_llm(policy_text: str) -> list:
@@ -635,16 +677,18 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     You are a strict compliance bot. Extract rules to JSON matching schema:
     [{{ "rule_id": "str", "rule_text": "str", "field": "foir|credit_score|loan_maturity_age", "operator": ">|<|>=|<=", "threshold": float, "severity": "HIGH|MEDIUM" }}]
     Policy: {policy_text}
-    Output ONLY valid JSON.
+    Output ONLY valid JSON. No markdown wrappers.
     """
     async with httpx.AsyncClient(timeout=120.0) as client:
-        # Assuming Ollama is running at ollama:11434 in docker-compose
-        res = await client.post("http://ollama:11434/api/generate", json={
-            "model": "llama3",
+        from app.core.config import settings
+
+        res = await client.post(settings.ollama_base_url, json={
+            "model": settings.ollama_model,
             "prompt": prompt,
             "format": "json",
             "stream": False
         })
+        # Strict parsing; if Ollama hallucinates, Temporal catches the error and retries.
         return json.loads(res.json()["response"])
 
 @activity.defn
@@ -656,27 +700,52 @@ async def broadcast_new_rules(rules: list):
 class ReloadPolicyWorkflow:
     @workflow.run
     async def run(self, policy_text: str):
+        # 1. Compile via LLM
         rules_json = await workflow.execute_activity(
-            extract_rules_from_llm, 
-            policy_text, 
-            start_to_close_timeout=timedelta(minutes=3)
+            extract_rules_from_llm, policy_text, start_to_close_timeout=timedelta(minutes=3)
         )
+        
+        # 2. Anchor in Postgres (The Audit Trail)
+        policy_id = await workflow.execute_activity(
+            persist_policy_to_db, rules_json, start_to_close_timeout=timedelta(seconds=30)
+        )
+        
+        # 3. Broadcast to Redis for Hot-Reload
         await workflow.execute_activity(
             broadcast_new_rules, 
-            rules_json,
+            {"policy_id": policy_id, "rules": rules_json}, # Now includes the DB ID
             start_to_close_timeout=timedelta(seconds=10)
         )
-        return "Hot-Reload Complete."
+        return f"Hot-Reload Complete. Active Policy ID: {policy_id}"
+
+async def main():
+    client = await Client.connect("temporal:7233")
+    worker = Worker(
+        client,
+        task_queue="policy-queue",
+        workflows=[ReloadPolicyWorkflow],
+        activities=[extract_rules_from_llm, broadcast_new_rules],
+    )
+    print("Starting Temporal Worker...")
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 #### **E. The FastAPI Orchestrator (`app/main.py`)**
 ```python
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path
 import asyncio
+from typing import List
 from temporalio.client import Client
 from app.core.state import policy_state
-from app.models.schemas import ApplicantPayload, DecisionResponse
+from app.core.config import settings
+from app.models.schemas import ApplicantPayload, DecisionResponse, RuleSchema
 from app.services.engine import DeterministicRuleEngine
+from sqlalchemy.orm import Session
+from app.models.schemas import EvaluationAudit, Base, PolicyAudit
+from worker.policy_workflow import SessionLocal
 
 app = FastAPI(title="Prayaan Credit Engine")
 engine = DeterministicRuleEngine()
@@ -687,41 +756,164 @@ async def startup_event():
 
 @app.post("/evaluate", response_model=DecisionResponse)
 async def evaluate(payload: ApplicantPayload):
+    # 1. Get current rules and the active policy_id from our thread-safe state
+    active_rules = policy_state.get_rules()
+    active_id = policy_state.get_current_policy_id()
+
+    if not active_rules or active_id is None:
+        raise HTTPException(status_code=503, detail="Rules not loaded. Policy not initialized. Call /policy/reload first.")
+
+    # 2. Deterministic Evaluation (PII never leaves the pod)
+    result = engine.evaluate(payload, active_rules, active_id)
+
+    # 3. Log Audit Trail to Postgres
+    # In production, this would be a background task to keep API latency low
+    db = SessionLocal() 
+    audit_entry = EvaluationAudit(
+        application_id=payload.application_id,
+        policy_version_id=active_id,
+        decision=result.decision,
+        reason=result.reason
+    )
+    db.merge(audit_entry) # Use merge to handle retries/re-evaluations
+    db.commit()
+    db.close()
+
+    # Add version to response for transparency
+    response = result.model_dump()
+    response["policy_version"] = active_id
+    return response
+
+@app.get("/rules", response_model=List[RuleSchema])
+async def get_all_rules():
+    """
+    Returns the complete list of parsed rules currently active in the engine.
+    Fetches directly from the thread-safe O(1) memory cache.
+    """
     rules = policy_state.get_rules()
     if not rules:
         raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
-    return engine.evaluate(payload, rules)
+    return rules
+
+@app.get("/rules/{rule_id}", response_model=RuleSchema)
+async def get_rule_by_id(rule_id: str = Path(..., description="The ID of the rule to fetch (e.g., R-01)")):
+    """
+    Returns the details of a specific rule.
+    """
+    rules = policy_state.get_rules()
+    if not rules:
+        raise HTTPException(status_code=503, detail="Rules not loaded. Call /policy/reload first.")
+    
+    # Simple linear search. If policy grows to 10k+ rules, we would index this in a dict.
+    for rule in rules:
+        if rule.rule_id == rule_id:
+            return rule
+            
+    raise HTTPException(status_code=404, detail=f"Rule with ID '{rule_id}' not found in active policy.")
 
 @app.post("/policy/reload", status_code=202)
 async def trigger_reload():
-    with open("data/policy.txt", "r") as f:
+    from app.core.config import settings
+
+    with open(settings.policy_file_path, "r") as f:
         text = f.read()
-    
-    # In production, cache the client connection
-    client = await Client.connect("temporal:7233")
-    await client.execute_workflow(
-        "ReloadPolicyWorkflow",
-        text,
-        id="policy-reload-job",
-        task_queue="policy-queue"
-    )
-    return {"status": "Reload workflow triggered. Listening for Redis invalidation."}
+
+    try:
+        client = await Client.connect(settings.temporal_server_url)
+        await client.execute_workflow(
+            "ReloadPolicyWorkflow",
+            text,
+            id="policy-reload-job",
+            task_queue="policy-queue"
+        )
+        return {"status": "Reload workflow triggered safely."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 ```
 
 ---
 
 #### **F. Integration Testing (Mocking Temporal)**
-
-Save this file as `tests/test_integration.py`. This test intercepts the outbound call to Temporal and the local file read, allowing the test to run in `<0.1 seconds`.
-
 ```python
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, mock_open
 from app.main import app
+from app.models.schemas import RuleSchema
+from app.core.config import settings
+from app.core.state import policy_state
 
 # Initialize the synchronous TestClient for FastAPI
 client = TestClient(app)
+
+
+# Test Data: A mock compiled policy
+MOCK_RULES = [
+    RuleSchema(
+        rule_id="R-01",
+        rule_text="Credit score >= 700",
+        field="credit_score",
+        operator=">=",
+        threshold=700,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-02",
+        rule_text="FOIR <= 50",
+        field="foir",
+        operator="<=",
+        threshold=50,
+        severity="MEDIUM"
+    ),
+    RuleSchema(
+        rule_id="R-03",
+        rule_text="Age > 18",
+        field="age",
+        operator=">",
+        threshold=18,
+        severity="HIGH"
+    )
+]
+
+def test_get_all_rules_success():
+    """
+    Test that /rules returns the full list when the cache is populated.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        response = client.get("/rules")
+        assert response.status_code == 200
+        assert len(response.json()) == 3
+        assert response.json()[0]["rule_id"] == "R-01"
+
+def test_get_specific_rule_success():
+    """
+    Test that /rules/{rule_id} returns the correct rule detail.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        # Case: Rule exists
+        response = client.get("/rules/R-02")
+        assert response.status_code == 200
+        assert response.json()["field"] == "foir"
+        assert response.json()["severity"] == "MEDIUM"
+
+def test_get_specific_rule_not_found():
+    """
+    Test the 404 boundary when a non-existent rule_id is requested.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
+        # Case: Rule ID does not exist in the mock list
+        response = client.get("/rules/R-99")
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"]
+
+def test_rules_endpoints_fail_when_cache_empty():
+    """
+    Test the 503 boundary when the system is fresh and no policy has been loaded.
+    """
+    with patch("app.core.state.policy_state.get_rules", return_value=[]):
+        response = client.get("/rules")
+        assert response.status_code == 503
+        assert "Rules not loaded" in response.json()["detail"]
 
 @patch("app.main.Client.connect", new_callable=AsyncMock)
 @patch("builtins.open", new_callable=mock_open, read_data="Rule R-01: FOIR <= 50")
@@ -742,15 +934,16 @@ async def test_policy_reload_triggers_temporal_workflow(mock_file, mock_temporal
     assert response.status_code == 202
     assert response.json()["status"] == "Reload workflow triggered safely."
 
-    # 4. Assert the Temporal Client connected to the right host
-    mock_temporal_connect.assert_called_once_with("temporal:7233")
+    # 4. Assert the Temporal Client connected to the configured host
+    # <-- 2. Update this assertion to use the dynamic setting instead of a hardcoded string
+    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url) 
 
     # 5. Assert the workflow was dispatched with the correct parameters
     mock_temporal_client_instance.execute_workflow.assert_called_once_with(
         "ReloadPolicyWorkflow",
         "Rule R-01: FOIR <= 50", # Matches our mocked file data
         id="policy-reload-job",
-        task_queue="policy-queue"
+        task_queue=settings.temporal_task_queue # <-- Make sure this matches config too
     )
 
 def test_evaluate_fails_gracefully_when_no_rules_loaded():
@@ -764,9 +957,90 @@ def test_evaluate_fails_gracefully_when_no_rules_loaded():
             "age": 30,
             "monthly_income": 50000,
             "credit_score": 750,
+            "existing_emi_obligations": 0,
             "loan_request": {"amount": 100000, "tenure_months": 12, "purpose": "capital"}
         })
         
         assert response.status_code == 503
         assert "Rules not loaded" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_includes_policy_version():
+    """Verify that the evaluation response includes the audit version ID."""
+    
+    with patch.object(policy_state, "get_rules", return_value=MOCK_RULES), \
+         patch.object(policy_state, "get_current_policy_id", return_value=42), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        response = client.post("/evaluate", json={
+            "application_id": "APP-AUDIT-001",
+            "age": 25,
+            "monthly_income": 50000,
+            "credit_score": 750,
+            "loan_request": {"amount": 10000, "tenure_months": 12, "purpose": "test"}
+        })
+        
+        assert response.status_code == 200
+        assert response.json()["policy_version"] == 42
+
+@pytest.mark.asyncio
+@patch("app.main.Client.connect", new_callable=AsyncMock)
+@patch("builtins.open", new_callable=mock_open, read_data="Mock Policy Content")
+async def test_policy_reload_orchestration(mock_file, mock_temporal_connect):
+    """
+    Integration test for the /policy/reload endpoint.
+    Verifies that the API correctly reads the configured file and 
+    dispatches the workflow to the configured Temporal Task Queue.
+    """
+    mock_temporal_instance = AsyncMock()
+    mock_temporal_connect.return_value = mock_temporal_instance
+
+    response = client.post("/policy/reload")
+
+    # Assertions
+    assert response.status_code == 202
+    
+    # Verify Temporal Connection uses config
+    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url)
+    
+    # Verify Workflow Dispatch uses config
+    mock_temporal_instance.execute_workflow.assert_called_once_with(
+        "ReloadPolicyWorkflow",
+        "Mock Policy Content",
+        id="policy-reload-job",
+        task_queue=settings.temporal_task_queue
+    )
+
+def test_get_rules_uninitialized():
+    """Verify 533 error when system has not yet been initialized with a policy."""
+    with patch("app.core.state.policy_state.get_rules", return_value=[]):
+        response = client.get("/rules")
+        assert response.status_code == 503
+        assert "Rules not loaded" in response.json()["detail"]
+
+
+def test_evaluate_endpoint_contract():
+    """Verify the /evaluate contract and the automated derivation of fields (FOIR)."""
+    # We mock the state so we don't need a real DB/Redis for this test
+    with patch("app.main.policy_state.get_rules", return_value=MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db: # Mock DB session for audit trail
+        
+        payload = {
+            "application_id": "APP-123",
+            "age": 25,
+            "monthly_income": 50000,
+            "credit_score": 750,
+            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert "decision" in data
+        assert "policy_version" in data
+        # Check that our derived field FOIR was calculated and returned in explainability
+        assert any(r["rule_id"] == "R-03" and r["applicant_value"] == 25 for r in data["rules_evaluated"])
 ```
