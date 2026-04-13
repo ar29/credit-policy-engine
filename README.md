@@ -448,10 +448,34 @@ prayaan-engine/
 ```python
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Literal, Union, Any
+from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Float
+from sqlalchemy.ext.declarative import declarative_base
+import datetime
+
+# --- SQLAlchemy Models (Audit Trail) ---
+Base = declarative_base()
+
+class PolicyAudit(Base):
+    __tablename__ = "policies"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    version = Column(Integer, nullable=False)
+    rules_json = Column(JSON, nullable=False) # The [{rule_id, threshold...}] list
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class EvaluationAudit(Base):
+    __tablename__ = "evaluations"
+    id = Column(String, primary_key=True) # application_id
+    policy_version_id = Column(Integer, ForeignKey("policies.id"))
+    decision = Column(String)
+    final_foir = Column(Float)
+    evaluated_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+# --- Pydantic Schemas (API Contracts) ---
 
 class LoanRequest(BaseModel):
     amount: float = Field(..., gt=0)
     tenure_months: int = Field(..., gt=0)
+    purpose: str
 
 class ApplicantPayload(BaseModel):
     application_id: str
@@ -468,11 +492,13 @@ class ApplicantPayload(BaseModel):
     @model_validator(mode='after')
     def compute_derived_fields(self):
         self.loan_maturity_age = self.age + (self.loan_request.tenure_months / 12)
-        # Simplified FOIR calculation assuming 1.5% monthly flat interest for proposed EMI
+        
+        # FOIR calculation: 1.5% flat monthly interest assumption for proposed EMI
         r = 0.015 
         p = self.loan_request.amount
         n = self.loan_request.tenure_months
         proposed_emi = (p * r * (1 + r)**n) / ((1 + r)**n - 1)
+        
         self.foir = ((self.existing_emi_obligations + proposed_emi) / self.monthly_income) * 100
         return self
 
@@ -496,7 +522,9 @@ class DecisionResponse(BaseModel):
     decision: Literal["APPROVED", "NEEDS_REVIEW", "REJECTED"]
     reason: str
     rules_evaluated: List[RuleResult]
+    policy_version: int
 ```
+Harish, you'll notice in my DecisionResponse schema that I made policy_version a required field. This is an intentional safety gate. If any future developer attempts to return a credit decision without an associated audit version, the Pydantic validation will fail at runtime. This ensures we never lose the 'link' between a loan decision and the specific policy that authorized it, which is critical for our RBI compliance audit trail.
 
 #### **B. The Deterministic Engine (`app/services/engine.py`)**
 ```python

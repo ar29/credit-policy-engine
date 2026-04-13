@@ -24,8 +24,9 @@ def test_engine_rejects_high_severity():
         )
     ]
     
-    response = engine.evaluate(applicant, rules)
+    response = engine.evaluate(applicant, rules, policy_id=1)
     assert response.decision == "REJECTED"
+    assert response.policy_version == 1
     assert response.rules_evaluated[0].passed is False
 
 def test_engine_needs_review_medium_severity():
@@ -60,5 +61,8 @@ def test_engine_needs_review_medium_severity():
         )
     ]
     
-    response = engine.evaluate(applicant, rules)
+    response = engine.evaluate(applicant, rules, policy_id=1)
     assert response.decision == "NEEDS_REVIEW"
+    assert response.policy_version == 1
+    # Check if FOIR failure was captured
+    assert any(r.rule_id == "R-02" and r.passed is False for r in response.rules_evaluated)

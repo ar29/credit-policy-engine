@@ -45,7 +45,7 @@ def test_get_all_rules_success():
     with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES):
         response = client.get("/rules")
         assert response.status_code == 200
-        assert len(response.json()) == 2
+        assert len(response.json()) == 3
         assert response.json()[0]["rule_id"] == "R-01"
 
 def test_get_specific_rule_success():
@@ -179,15 +179,15 @@ def test_get_rules_uninitialized():
     """Verify 533 error when system has not yet been initialized with a policy."""
     with patch("app.core.state.policy_state.get_rules", return_value=[]):
         response = client.get("/rules")
-        assert response.status_code == 533
+        assert response.status_code == 503
         assert "Rules not loaded" in response.json()["detail"]
 
 
 def test_evaluate_endpoint_contract():
     """Verify the /evaluate contract and the automated derivation of fields (FOIR)."""
     # We mock the state so we don't need a real DB/Redis for this test
-    with patch("app.core.state.policy_state.get_rules", return_value=MOCK_RULES), \
-         patch("app.core.state.policy_state.get_current_policy_id", return_value=1), \
+    with patch("app.main.policy_state.get_rules", return_value=MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
          patch("app.main.SessionLocal") as mock_db: # Mock DB session for audit trail
         
         payload = {
@@ -205,5 +205,5 @@ def test_evaluate_endpoint_contract():
         assert "decision" in data
         assert "policy_version" in data
         # Check that our derived field FOIR was calculated and returned in explainability
-        assert any(r["applicant_value"] == 25 for r in data["rules_evaluated"] if r["rule_id"] == "R1")
+        assert any(r["rule_id"] == "R-03" and r["applicant_value"] == 25 for r in data["rules_evaluated"])
 

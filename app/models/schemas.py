@@ -16,9 +16,10 @@ class PolicyAudit(Base):
 
 class EvaluationAudit(Base):
     __tablename__ = "evaluations"
-    id = Column(String, primary_key=True) # application_id
+    application_id = Column(String, primary_key=True) # application_id
     policy_version_id = Column(Integer, ForeignKey("policies.id"))
     decision = Column(String)
+    reason = Column(String, nullable=True)
     final_foir = Column(Float)
     evaluated_at = Column(DateTime, default=datetime.datetime.utcnow)
 

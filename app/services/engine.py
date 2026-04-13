@@ -9,7 +9,7 @@ OPERATORS = {
 }
 
 class DeterministicRuleEngine:
-    def evaluate(self, applicant: ApplicantPayload, rules: List[RuleSchema]) -> DecisionResponse:
+    def evaluate(self, applicant: ApplicantPayload, rules: List[RuleSchema], policy_id: int) -> DecisionResponse:
         results = []
         failed_high = 0
         failed_medium = 0
@@ -47,5 +47,6 @@ class DeterministicRuleEngine:
             application_id=applicant.application_id,
             decision=decision,
             reason=reason,
-            rules_evaluated=results
+            rules_evaluated=results,
+            policy_version=policy_id
         )
