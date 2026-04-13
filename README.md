@@ -541,7 +541,7 @@ prayaan-engine/
 #### **A. The Models & Contracts (`app/models/schemas.py`)**
 ```python
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Literal, Union, Any
+from typing import List, Literal, Union, Any, Optional
 from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
 import datetime
@@ -558,9 +558,10 @@ class PolicyAudit(Base):
 
 class EvaluationAudit(Base):
     __tablename__ = "evaluations"
-    id = Column(String, primary_key=True) # application_id
+    application_id = Column(String, primary_key=True) # application_id
     policy_version_id = Column(Integer, ForeignKey("policies.id"))
     decision = Column(String)
+    reason = Column(String, nullable=True)
     final_foir = Column(Float)
     evaluated_at = Column(DateTime, default=datetime.datetime.utcnow)
 
@@ -577,7 +578,15 @@ class ApplicantPayload(BaseModel):
     monthly_income: float = Field(..., gt=0)
     existing_emi_obligations: float = Field(default=0.0, ge=0)
     credit_score: int
+    co_applicant_score: Optional[int] = None
     loan_request: LoanRequest
+    industry_type: str = "others"
+    effective_cibil_threshold: int = 700
+    credit_eligibility_score: int = 0
+
+    # Virtual fields for the engine to target
+    credit_eligibility_score: int = 0
+    is_industry_allowed: bool = True
     
     # Derived Fields
     foir: float = 0.0
@@ -588,12 +597,37 @@ class ApplicantPayload(BaseModel):
         self.loan_maturity_age = self.age + (self.loan_request.tenure_months / 12)
         
         # FOIR calculation: 1.5% flat monthly interest assumption for proposed EMI
+        # EMI Calculation (Approx 18% ROI for MSME)
         r = 0.015 
         p = self.loan_request.amount
         n = self.loan_request.tenure_months
         proposed_emi = (p * r * (1 + r)**n) / ((1 + r)**n - 1)
-        
         self.foir = ((self.existing_emi_obligations + proposed_emi) / self.monthly_income) * 100
+
+        # 1. The "Logic Bridge" for New-to-Credit (NTC)
+        # Standardizes the field so the LLM only needs to extract ONE rule
+        if self.credit_score in [-1, 0]:
+            self.credit_eligibility_score = self.co_applicant_score if self.co_applicant_score else 0
+        else:
+            self.credit_eligibility_score = self.credit_score
+
+        # 2. Logic Bridge for Tiered CIBIL (MSME Policy Section 3)
+        # If loan > 10 Lakhs, threshold is 750, else 700.
+        if self.loan_request.amount > 1000000:
+            self.effective_cibil_threshold = 750
+        else:
+            self.effective_cibil_threshold = 700
+        
+        # 3. Negative Industry Logic
+        negative_list = {
+            "real estate", "real estate broker", 
+            "gem & jewellery", "jewellery wholesaler",
+            "perishable trading"
+        }
+        
+        # Exact match or "Contains" logic could be applied here
+        self.is_industry_allowed = self.industry_type.lower() not in negative_list
+        
         return self
 
 class RuleSchema(BaseModel):
@@ -772,6 +806,16 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     [{{ "rule_id": "str", "rule_text": "str", "field": "foir|credit_score|loan_maturity_age", "operator": ">|<|>=|<=", "threshold": float, "severity": "HIGH|MEDIUM" }}]
     Policy: {policy_text}
     Output ONLY valid JSON. No markdown wrappers.
+
+    Special Mapping Instruction: If the policy mentions credit score requirements for 'New-to-Credit' or 'No History' 
+    applicants involving a co-applicant, map the 'field' to credit_eligibility_score. 
+    Treat the required co-applicant score as the 'threshold'."
+
+    Constraint: When the policy defines a base credit score (e.g., 700) 
+    but provides an exception for "New-to-Credit" (NTC) applicants via a co-applicant, 
+    DO NOT generate a separate rule for credit_score. 
+    Instead, generate a SINGLE rule using credit_eligibility_score. 
+    This ensures the exception logic is handled within the data model rather than creating conflicting rules.
     """
     async with httpx.AsyncClient(timeout=120.0) as client:
         from app.core.config import settings
@@ -969,6 +1013,44 @@ MOCK_RULES = [
     )
 ]
 
+# MSME Mock Rules as they would be compiled by the LLM
+MSME_MOCK_RULES = [
+    RuleSchema(
+        rule_id="R-01",
+        rule_text="NTC Eligibility: Co-applicant score > 720 if applicant has no history",
+        field="credit_eligibility_score",
+        operator=">=",
+        threshold=720,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-02",
+        rule_text="FOIR must be <= 50%",
+        field="foir",
+        operator="<=",
+        threshold=50.0,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-03",
+        rule_text="High Value CIBIL: > 750 for loans exceeding 10L",
+        field="credit_score",
+        operator=">=",
+        threshold=750, # The threshold for the specific rule
+        severity="HIGH"
+    )
+]
+
+BASE_MSME_PAYLOAD = {
+    "application_id": "APP-123",
+    "age": 25,
+    "monthly_income": 50000,
+    "credit_score": 750,
+    "annual_turnover": 1500000,      # Added for MSME Schema
+    "business_vintage_months": 24,   # Added for MSME Schema
+    "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
+}
+
 def test_get_all_rules_success():
     """
     Test that /rules returns the full list when the cache is populated.
@@ -1121,15 +1203,7 @@ def test_evaluate_endpoint_contract():
          patch("app.main.policy_state.get_current_policy_id", return_value=1), \
          patch("app.main.SessionLocal") as mock_db: # Mock DB session for audit trail
         
-        payload = {
-            "application_id": "APP-123",
-            "age": 25,
-            "monthly_income": 50000,
-            "credit_score": 750,
-            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Expansion"}
-        }
-        
-        response = client.post("/evaluate", json=payload)
+        response = client.post("/evaluate", json=BASE_MSME_PAYLOAD) # Use full payload
         
         assert response.status_code == 200
         data = response.json()
@@ -1137,4 +1211,66 @@ def test_evaluate_endpoint_contract():
         assert "policy_version" in data
         # Check that our derived field FOIR was calculated and returned in explainability
         assert any(r["rule_id"] == "R-03" and r["applicant_value"] == 25 for r in data["rules_evaluated"])
+
+
+@pytest.mark.asyncio
+async def test_evaluate_ntc_co_applicant_logic():
+    """Verify that an NTC applicant (score 0) passes using their co-applicant's score."""
+    with patch("app.main.policy_state.get_rules", return_value=MSME_MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        # Applicant has 0 score, but co-applicant has 750
+        payload = {
+            "application_id": "MSME-NTC-001",
+            "age": 30,
+            "monthly_income": 100000,
+            "credit_score": 0, 
+            "co_applicant_score": 750,
+            "annual_turnover": 2000000,
+            "business_vintage_months": 36,
+            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Working Capital"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Find the R-01 result
+        ntc_rule = next(r for r in data["rules_evaluated"] if r["rule_id"] == "R-01")
+        assert ntc_rule["applicant_value"] == 750
+        assert ntc_rule["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_tiered_cibil_failure():
+    """Verify high-value loan fails if score is < 750, even if it is > 700."""
+    with patch("app.main.policy_state.get_rules", return_value=MSME_MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        payload = {
+            "application_id": "MSME-HV-001",
+            "age": 40,
+            "monthly_income": 200000,
+            "credit_score": 720, # Passes standard (700) but fails High-Value (750)
+            "annual_turnover": 5000000,
+            "business_vintage_months": 48,
+            "loan_request": {"amount": 1500000, "tenure_months": 36, "purpose": "Machinery"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        data = response.json()
+        
+        # The decision should be REJECTED because credit_score (720) < threshold (750)
+        assert data["decision"] == "REJECTED"
+        assert any(r["rule_id"] == "R-03" and r["passed"] is False for r in data["rules_evaluated"])
+
+def test_evaluate_fails_without_policy():
+    """Ensure 503 is returned if no policy is loaded."""
+    with patch("app.main.policy_state.get_rules", return_value=[]), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=None):
+        
+        response = client.post("/evaluate", json={"application_id": "FAIL", "age": 25, "monthly_income": 10, "credit_score": 700, "annual_turnover": 10, "business_vintage_months": 1, "loan_request": {"amount": 10, "tenure_months": 1, "purpose": "test"}})
+        assert response.status_code == 503
 ```
