@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Literal, Union, Any
+from typing import List, Literal, Union, Any, Optional
 from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
 import datetime
@@ -36,7 +36,13 @@ class ApplicantPayload(BaseModel):
     monthly_income: float = Field(..., gt=0)
     existing_emi_obligations: float = Field(default=0.0, ge=0)
     credit_score: int
+    co_applicant_score: Optional[int] = None
     loan_request: LoanRequest
+    industry_type: str = "others"
+
+    # Virtual fields for the engine to target
+    credit_eligibility_score: int = 0
+    is_industry_allowed: bool = True
     
     # Derived Fields
     foir: float = 0.0
@@ -47,12 +53,37 @@ class ApplicantPayload(BaseModel):
         self.loan_maturity_age = self.age + (self.loan_request.tenure_months / 12)
         
         # FOIR calculation: 1.5% flat monthly interest assumption for proposed EMI
+        # EMI Calculation (Approx 18% ROI for MSME)
         r = 0.015 
         p = self.loan_request.amount
         n = self.loan_request.tenure_months
         proposed_emi = (p * r * (1 + r)**n) / ((1 + r)**n - 1)
-        
         self.foir = ((self.existing_emi_obligations + proposed_emi) / self.monthly_income) * 100
+
+        # 1. The "Logic Bridge" for New-to-Credit (NTC)
+        # Standardizes the field so the LLM only needs to extract ONE rule
+        if self.credit_score in [-1, 0]:
+            self.credit_eligibility_score = self.co_applicant_score if self.co_applicant_score else 0
+        else:
+            self.credit_eligibility_score = self.credit_score
+
+        # 2. Logic Bridge for Tiered CIBIL (MSME Policy Section 3)
+        # If loan > 10 Lakhs, threshold is 750, else 700.
+        if self.loan_request.amount > 1000000:
+            self.effective_cibil_threshold = 750
+        else:
+            self.effective_cibil_threshold = 700
+        
+        # 3. Negative Industry Logic
+        negative_list = {
+            "real estate", "real estate broker", 
+            "gem & jewellery", "jewellery wholesaler",
+            "perishable trading"
+        }
+        
+        # Exact match or "Contains" logic could be applied here
+        self.is_industry_allowed = self.industry_type.lower() not in negative_list
+        
         return self
 
 class RuleSchema(BaseModel):

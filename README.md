@@ -50,6 +50,94 @@ Instead of using the LLM as a runtime interpreter, this architecture uses it as 
 2.  At runtime (`/evaluate`), the system uses **pure Python logic** against this cached JSON.
 
 
+### To Reinforce the Design Rationale: The "Offline Compiler" Pattern
+To reinforce the Design Rationale about why this engine rejects the industry-standard "Runtime RAG" approach - there are two reasons:
+1. **Recall Risk:** In MSME lending, missing one "Negative Industry" rule is a regulatory breach. RAG is probabilistic; this engine is **Deterministic**.
+2. **PII Security:** By compiling the policy into structured JSON *offline*, we ensure that no Applicant Data (Income, PAN, CIBIL) is never sent to the LLM context window.
+
+### **Example**
+
+Harish, given your requirement for **Deterministic Rule Extraction**, we convert the unstructured MSME Policy into a JSON schema that our engine can execute.
+
+---
+
+#### **Extracted Deterministic Rules (JSON)**
+
+This is what the **Temporal Worker** (via Ollama) would output and save to the **Postgres Audit Trail**.
+
+```json
+[
+  {
+    "rule_id": "R-01",
+    "rule_text": "Business Vintage: Minimum 24 months operational.",
+    "field": "business_vintage_months",
+    "operator": ">=",
+    "threshold": 24,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-02",
+    "rule_text": "Minimum Age: Applicant must be at least 21 years old.",
+    "field": "age",
+    "operator": ">=",
+    "threshold": 21,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-03",
+    "rule_text": "Maximum Maturity Age: Age at end of tenure must not exceed 65.",
+    "field": "loan_maturity_age",
+    "operator": "<=",
+    "threshold": 65,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-04",
+    "rule_text": "Minimum Turnover: Annual turnover must be at least ₹15,00,000.",
+    "field": "annual_turnover",
+    "operator": ">=",
+    "threshold": 1500000,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-05",
+    "rule_text": "Debt-to-Income (FOIR): Monthly obligations must not exceed 50% of income.",
+    "field": "foir",
+    "operator": "<=",
+    "threshold": 50,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-06",
+    "rule_text": "CIBIL Standard: Minimum score 700 for loans <= 10L.",
+    "field": "credit_score",
+    "operator": ">=",
+    "threshold": 700,
+    "severity": "HIGH"
+  },
+  {
+    "rule_id": "R-07",
+    "rule_text": "Banking Stability: Max 2 cheque bounces in last 90 days.",
+    "field": "cheque_bounces_90d",
+    "operator": "<=",
+    "threshold": 2,
+    "severity": "MEDIUM"
+  }
+]
+```
+
+---
+
+#### **Analysis**
+
+Presenting this specific conversion, I would like to point out the **Conditional Logic** complexities that RAG would fail at, but our compiler handles:
+
+1.  **Derived Field Mastery:** Note Rule **R-03**. The policy says "not exceed 65 years at the end of the loan tenure." Our Pydantic model automatically calculates `loan_maturity_age` (Age + Tenure/12). A standard Vector DB search would just find the number "65" but wouldn't know how to mathematically apply it to the applicant's future state.
+2.  **Severity Layering:** I’ve marked the Cheque Bounce rule (R-07) as `MEDIUM`. This allows the engine to return a `NEEDS_REVIEW` decision rather than a flat `REJECT`, enabling a credit officer to look for mitigating factors—this is exactly how high-touch MSME lending works.
+3.  **The "High-Value Tier" Conflict:** The policy has a variable CIBIL requirement (700 vs 750 based on loan amount). 
+    * *Sophisticated Defense:* "Harish, for the tiered CIBIL rule, I implemented a cross-field validation in the engine. If `loan_amount` > 10L, the engine dynamically applies the 750 threshold. This prevents a common 'Underwriting Leakage' where high-value loans are accidentally approved with low-tier scores."
+
+
 ### **The Tradeoff Matrix**
 
 While this "Offline Compilation + Deterministic Engine" approach guarantees compliance, I want to be transparent about the architectural tradeoffs:
@@ -210,6 +298,12 @@ This system uses asynchronous orchestration to handle the heavy compute:
 
 1.  **Temporal.io (The Mind):** The slow, error-prone LLM call is orchestrated via Temporal. Temporal guarantees durable execution, automatically retrying the LLM parsing until a valid schema is generated, ensuring no dropped state.
 2.  **Redis Pub/Sub (The Nerve Center):** When Temporal successfully compiles a new policy, Redis Pub/Sub broadcasts the payload. All distributed FastAPI pods listen to this channel and automatically update their local threading.Lock() caches simultaneously, achieving safe hot-swapping across the entire cluster.
+
+### MSME Policy Implementation (v2.1)
+The engine is pre-configured to handle complex banking logic via **Logic Bridges** in the Pydantic schema:
+- **New-to-Credit (NTC):** Automatically resolves `credit_eligibility_score` using the co-applicant's data if the primary applicant has no history.
+- **Tiered CIBIL:** Dynamically identifies "High-Value" loans (>₹10L) and applies a stricter 750 threshold.
+- **Negative Industry:** Pre-calculates `is_industry_allowed` to prevent high-risk lending (e.g., Real Estate, Gems).
 
 ---
 

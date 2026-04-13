@@ -38,6 +38,34 @@ MOCK_RULES = [
     )
 ]
 
+# MSME Mock Rules as they would be compiled by the LLM
+MSME_MOCK_RULES = [
+    RuleSchema(
+        rule_id="R-01",
+        rule_text="NTC Eligibility: Co-applicant score > 720 if applicant has no history",
+        field="credit_eligibility_score",
+        operator=">=",
+        threshold=720,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-02",
+        rule_text="FOIR must be <= 50%",
+        field="foir",
+        operator="<=",
+        threshold=50.0,
+        severity="HIGH"
+    ),
+    RuleSchema(
+        rule_id="R-03",
+        rule_text="High Value CIBIL: > 750 for loans exceeding 10L",
+        field="credit_score",
+        operator=">=",
+        threshold=750, # The threshold for the specific rule
+        severity="HIGH"
+    )
+]
+
 def test_get_all_rules_success():
     """
     Test that /rules returns the full list when the cache is populated.
@@ -206,4 +234,66 @@ def test_evaluate_endpoint_contract():
         assert "policy_version" in data
         # Check that our derived field FOIR was calculated and returned in explainability
         assert any(r["rule_id"] == "R-03" and r["applicant_value"] == 25 for r in data["rules_evaluated"])
+
+
+@pytest.mark.asyncio
+async def test_evaluate_ntc_co_applicant_logic():
+    """Verify that an NTC applicant (score 0) passes using their co-applicant's score."""
+    with patch("app.main.policy_state.get_rules", return_value=MSME_MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        # Applicant has 0 score, but co-applicant has 750
+        payload = {
+            "application_id": "MSME-NTC-001",
+            "age": 30,
+            "monthly_income": 100000,
+            "credit_score": 0, 
+            "co_applicant_score": 750,
+            "annual_turnover": 2000000,
+            "business_vintage_months": 36,
+            "loan_request": {"amount": 500000, "tenure_months": 24, "purpose": "Working Capital"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Find the R-01 result
+        ntc_rule = next(r for r in data["rules_evaluated"] if r["rule_id"] == "R-01")
+        assert ntc_rule["applicant_value"] == 750
+        assert ntc_rule["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_tiered_cibil_failure():
+    """Verify high-value loan fails if score is < 750, even if it is > 700."""
+    with patch("app.main.policy_state.get_rules", return_value=MSME_MOCK_RULES), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=1), \
+         patch("app.main.SessionLocal") as mock_db:
+        
+        payload = {
+            "application_id": "MSME-HV-001",
+            "age": 40,
+            "monthly_income": 200000,
+            "credit_score": 720, # Passes standard (700) but fails High-Value (750)
+            "annual_turnover": 5000000,
+            "business_vintage_months": 48,
+            "loan_request": {"amount": 1500000, "tenure_months": 36, "purpose": "Machinery"}
+        }
+        
+        response = client.post("/evaluate", json=payload)
+        data = response.json()
+        
+        # The decision should be REJECTED because credit_score (720) < threshold (750)
+        assert data["decision"] == "REJECTED"
+        assert any(r["rule_id"] == "R-03" and r["passed"] is False for r in data["rules_evaluated"])
+
+def test_evaluate_fails_without_policy():
+    """Ensure 503 is returned if no policy is loaded."""
+    with patch("app.main.policy_state.get_rules", return_value=[]), \
+         patch("app.main.policy_state.get_current_policy_id", return_value=None):
+        
+        response = client.post("/evaluate", json={"application_id": "FAIL", "age": 25, "monthly_income": 10, "credit_score": 700, "annual_turnover": 10, "business_vintage_months": 1, "loan_request": {"amount": 10, "tenure_months": 1, "purpose": "test"}})
+        assert response.status_code == 503
 

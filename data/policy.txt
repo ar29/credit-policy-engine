@@ -2,3 +2,53 @@ Policy Document: MSME Express Loan
 Rule R-01 [HIGH]: Applicants with loan amount > 2,50,000 must have a credit_score of at least 700.
 Rule R-02 [MEDIUM]: foir must not exceed 50.
 Rule R-03 [HIGH]: loan_maturity_age must be <= 65.
+
+Policy Document: MSME Express Loan Program (v2.1)
+Confidential - For Internal Use Only
+
+1. Applicant Eligibility
+--------------------------
+• Business Vintage: To ensure stability, the borrowing entity must have been 
+  operational for a minimum of 24 months from the official date of registration.
+• Age Criteria: The primary applicant or promoter must be at least 21 years 
+  old at the time of application. Furthermore, the applicant's age must not 
+  exceed 65 years at the point of loan maturity (end of the loan tenure).
+• Nationality: Eligibility is strictly limited to Indian Citizens residing 
+  within the domestic borders of India.
+
+2. Financial Requirements
+--------------------------
+• Minimum Annual Turnover: The business must demonstrate scale by showing a 
+  minimum audited or GST-certified annual turnover of ₹15,00,000.
+• Banking Stability: We require bank statements for the previous 6 months. 
+  The application will be flagged for review if there are more than 2 cheque 
+  bounces due to "insufficient funds" within the last 90 days.
+• Debt-to-Income (DTI): To prevent over-leveraging, the Total Monthly 
+  Obligations (including the proposed loan EMI) must not exceed a 50% ratio 
+  of the Net Monthly Income (FOIR).
+
+3. Credit Scoring (CIBIL)
+--------------------------
+• Standard Approval: A minimum CIBIL Bureau score of 700 is mandatory for 
+  unsecured loans up to ₹10,00,000.
+• High-Value Tier: For loan requests exceeding ₹10,00,000, the risk appetite 
+  tightens to a minimum CIBIL requirement of 750.
+• New-to-Credit: Applicants with a score of "-1" or "0" (No History) may 
+  be considered for approval only if they provide a co-applicant with a 
+  demonstrated CIBIL score exceeding 720.
+
+4. Negative Industry List
+--------------------------
+The following sectors are designated as "High Risk" and applications must 
+be Rejected immediately:
+• Real Estate developers and Brokers.
+• Gem and Jewellery wholesalers.
+• Perishable agricultural goods trading (unless Cold-Storage proof is provided).
+
+5. Loan Purpose & Tenure
+--------------------------
+• Maximum Tenure: 36 months for working capital requirements; 60 months 
+  for specific machinery or asset purchases.
+• Restricted Use: Loan proceeds are strictly for business growth. Use for 
+  speculative investments, stock market trading, or repayment of personal 
+  credit card debt is prohibited.

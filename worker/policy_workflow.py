@@ -39,6 +39,16 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     [{{ "rule_id": "str", "rule_text": "str", "field": "foir|credit_score|loan_maturity_age", "operator": ">|<|>=|<=", "threshold": float, "severity": "HIGH|MEDIUM" }}]
     Policy: {policy_text}
     Output ONLY valid JSON. No markdown wrappers.
+
+    Special Mapping Instruction: If the policy mentions credit score requirements for 'New-to-Credit' or 'No History' 
+    applicants involving a co-applicant, map the 'field' to credit_eligibility_score. 
+    Treat the required co-applicant score as the 'threshold'."
+
+    Constraint: When the policy defines a base credit score (e.g., 700) 
+    but provides an exception for "New-to-Credit" (NTC) applicants via a co-applicant, 
+    DO NOT generate a separate rule for credit_score. 
+    Instead, generate a SINGLE rule using credit_eligibility_score. 
+    This ensures the exception logic is handled within the data model rather than creating conflicting rules.
     """
     async with httpx.AsyncClient(timeout=120.0) as client:
         from app.core.config import settings
