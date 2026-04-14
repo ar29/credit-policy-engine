@@ -84,12 +84,19 @@ async def trigger_reload():
 
     try:
         client = await Client.connect(settings.temporal_server_url)
-        await client.execute_workflow(
+        
+        # CHANGED: Use start_workflow instead of execute_workflow
+        handle = await client.start_workflow(
             "ReloadPolicyWorkflow",
             text,
             id="policy-reload-job",
             task_queue="policy-queue"
         )
-        return {"status": "Reload workflow triggered safely."}
+        
+        return {
+            "status": "Reload workflow triggered safely.",
+            "workflow_id": handle.id,
+            "run_id": handle.run_id
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

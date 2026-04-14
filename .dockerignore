@@ -16,3 +16,4 @@ tests
 *.test.js
 *.spec.js
 venv/
+ollama_data/

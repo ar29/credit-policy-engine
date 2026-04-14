@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     
     # LLM
     ollama_base_url: str = "http://localhost:11434/api/generate"
-    ollama_model: str = "llama3.2:1b"
+    ollama_model: str = "deepseek-r1:1.5b"
+    openai_api_key: str = "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"
     
     # File Paths
     policy_file_path: str = "data/policy.txt"

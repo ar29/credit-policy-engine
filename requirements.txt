@@ -18,3 +18,4 @@ httpx==0.25.2
 # Testing Suite
 pytest==7.4.3
 pytest-asyncio==0.23.2
+openai>=1.0.0

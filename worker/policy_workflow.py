@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.models.schemas import PolicyAudit, Base
 from app.core.database import SessionLocal # NEW IMPORT
+from openai import AsyncOpenAI
 
 
 @activity.defn
@@ -57,10 +58,7 @@ async def extract_rules_from_llm(policy_text: str) -> list:
             "effective_cibil_threshold", 
             "credit_eligibility_score", 
             "is_industry_allowed", 
-            "foir", 
-            "loan_maturity_age",
-            "amount",     # Derived mapping for loan_request.amount
-            "tenure_months"    # Derived mapping for loan_request.tenure_months
+            "co_applicant_score",
         ]
         operator: Literal[">", ">=", "<", "<=", "=="]
         threshold: float # Float covers both ints and decimals in JSON
@@ -95,24 +93,32 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     # ---------------------------------------------------------
     # 3. Execute the API Call
     # ---------------------------------------------------------
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        from app.core.config import settings
 
-        res = await client.post(settings.ollama_base_url, json={
-            "model": settings.ollama_model,
-            "prompt": prompt,
-            "format": PolicyExtraction.model_json_schema(),
-            "stream": False,
-            "options": {
-                    "temperature": 0.1 # Low temperature for extraction tasks
-                }
-        })
-        # ---------------------------------------------------------
-        # 4. Parse and Validate the Output
-        # ---------------------------------------------------------
-        res_json = json.loads(res.json()["response"])
+    # 3.1 FAIL-SAFE GUARD: Prevent errors if the key didn't load
+    api_key = settings.openai_api_key
+    if not api_key or api_key == "None" or api_key.strip() == "":
+        raise ValueError("OPENAI_API_KEY is missing!")
 
-        return res_json["rules"]
+    # 3.2 Initialize the Async Client
+    client = AsyncOpenAI(api_key=api_key)
+
+    # 3.3 Execute Request Using the .parse() Method
+    # The .parse() method automatically instructs the model to return JSON matching 
+    # your Pydantic schema and validates the response before returning it.
+    response = await client.beta.chat.completions.parse(
+        model="gpt-4o", # Use gpt-4o or gpt-4o-mini for Structured Outputs
+        messages=[
+            {"role": "system", "content": "You are a strict compliance bot. Extract rules to JSON matching the schema."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1, # Keep low for deterministic extraction
+        response_format=PolicyExtraction # Pass the Pydantic class directly
+    )
+    
+    # 3.4 Access the parsed and validated Pydantic object
+    validated_data = response.choices[0].message.parsed
+    
+    return validated_data.rules
 
 @activity.defn
 async def broadcast_new_rules(rules: list, version_id: int):
@@ -159,7 +165,22 @@ class ReloadPolicyWorkflow:
         return f"Hot-Reload Complete. Active Policy ID: {policy_id}"
 
 async def main():
-    client = await Client.connect("temporal:7233")
+    print("Connecting to Temporal server...")
+    client = None
+    
+    # Retry loop: Try 5 times, wait 3 seconds between attempts
+    for attempt in range(5):
+        try:
+            client = await Client.connect("temporal:7233")
+            print("Successfully connected to Temporal!")
+            break
+        except Exception as e:
+            print(f"Temporal not ready yet. Retrying in 3 seconds... (Attempt {attempt + 1}/5)")
+            await asyncio.sleep(3)
+            
+    if not client:
+        raise RuntimeError("Failed to connect to Temporal server after 5 attempts.")
+    print("Starting Temporal Worker...")
     worker = Worker(
         client,
         task_queue="policy-queue",
@@ -167,7 +188,6 @@ async def main():
         activities=[extract_rules_from_llm, broadcast_new_rules, persist_policy_to_db],
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
-    print("Starting Temporal Worker...")
     await worker.run()
 
 if __name__ == "__main__":
