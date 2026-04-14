@@ -1,3 +1,4 @@
+import logging
 import operator
 from typing import List
 from app.models.schemas import ApplicantPayload, RuleSchema, DecisionResponse, RuleResult
@@ -18,7 +19,27 @@ class DeterministicRuleEngine:
             try:
                 applicant_value = getattr(applicant, rule.field)
                 op_func = OPERATORS[rule.operator]
-                threshold_val = type(applicant_value)(rule.threshold)
+                # --- DYNAMIC THRESHOLD RESOLUTION ---
+                if rule.field == "credit_score" and applicant.loan_request.amount > 250000:
+                    # Apply the 2.5L condition
+                    threshold_val = applicant.effective_cibil_threshold
+                elif rule.field == "credit_eligibility_score":
+                    # Use the NTC logic bridge
+                    threshold_val = rule.threshold
+                else:
+                    # Standard static threshold
+                    threshold_val = type(applicant_value)(rule.threshold)
+                
+                # Skip rule if it's conditional and the condition isn't met (e.g., small loan)
+                if rule.field == "credit_score" and applicant.loan_request.amount <= 250000:
+                    continue
+
+                # Safety Check: If a rule has a threshold <= 100 but is targeting a currency field, 
+                # it's likely a mapping error.
+                if rule.field == "existing_emi_obligations" and rule.threshold <= 100:
+                    logging.warning(f"Detected potential mapping error for {rule.rule_id}. Redirecting to foir.")
+                    rule.field = "foir" # Auto-correct to the derived field
+
                 passed = op_func(applicant_value, threshold_val)
             except (AttributeError, ValueError, KeyError):
                 passed = False
@@ -28,7 +49,7 @@ class DeterministicRuleEngine:
                 rule_id=rule.rule_id,
                 rule_text=rule.rule_text,
                 applicant_value=applicant_value,
-                threshold=rule.threshold,
+                threshold=threshold_val,
                 passed=passed
             ))
 

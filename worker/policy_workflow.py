@@ -57,7 +57,7 @@ async def extract_rules_from_llm(policy_text: str) -> list:
             "industry_type", 
             "effective_cibil_threshold", 
             "credit_eligibility_score", 
-            "is_industry_allowed", 
+            "industry_type", 
             "co_applicant_score",
         ]
         operator: Literal[">", ">=", "<", "<=", "=="]
@@ -74,20 +74,34 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     # ---------------------------------------------------------
 
     prompt = f"""
-    You are a strict compliance bot. Extract rules to JSON.
-    Output ONLY valid JSON matching the schema. No markdown wrappers.
+    You are a High-Precision Policy Compiler for a regulated NBFC. 
+    Your task is to convert unstructured credit policy text into a strictly validated JSON array.
 
-    Special Mapping Instruction: If the policy mentions credit score requirements for 'New-to-Credit' or 'No History' 
-    applicants involving a co-applicant, map the 'field' to credit_eligibility_score. 
-    Treat the required co-applicant score as the 'threshold'.
+    ### OUTPUT RULE
+    - Output ONLY valid JSON.
+    - DO NOT use markdown code blocks (```json).
+    - DO NOT include prose or explanations.
 
-    Constraint: When the policy defines a base credit score (e.g., 700) 
-    but provides an exception for "New-to-Credit" (NTC) applicants via a co-applicant, 
-    DO NOT generate a separate rule for credit_score. 
-    Instead, generate a SINGLE rule using credit_eligibility_score. 
-    This ensures the exception logic is handled within the data model rather than creating conflicting rules.
-    
-    Policy: {policy_text}
+    ### STRICT FIELD MAPPING ANCHORS
+    You must map conceptual policy terms to these specific physical schema fields:
+    1. "FOIR", "DTI", "Debt-to-Income", "Obligation Ratio" -> field: "foir"
+    *CRITICAL*: Never map these to "existing_emi_obligations". FOIR is the ratio.
+    2. "CIBIL", "Credit Score", "Bureau Score" -> field: "credit_score"
+    3. "Age", "Applicant Age" -> field: "age"
+    4. "Maturity Age", "Age at end of tenure" -> field: "loan_maturity_age"
+    5. "Business Vintage", "Years operational", "Registration age" -> field: "business_vintage_months"
+    6. "Industry", "Sector", "Negative List" -> field: "is_industry_allowed"
+    7. "Co-applicant Score", "Secondary Applicant CIBIL" -> field: "co_applicant_score"
+    8. "Effective CIBIL Threshold", "Dynamic CIBIL Limit" -> field: "effective_cibil_threshold"
+    9. "Credit Eligibility Score", "NTC Score" -> field: "credit_eligibility_score"
+
+
+    ### DATA TYPE CONSTRAINTS
+    - Thresholds for "foir" must be percentage integers (e.g., 50, not 0.5).
+    - Thresholds for "is_industry_allowed" must be the boolean: true.
+
+    Policy Text:
+    {policy_text}
     """
 
     # ---------------------------------------------------------

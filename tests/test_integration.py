@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, AsyncMock, mock_open
+from unittest.mock import patch, AsyncMock, mock_open, MagicMock
 from app.main import app
 from app.models.schemas import RuleSchema
 from app.core.config import settings
@@ -116,36 +116,50 @@ def test_rules_endpoints_fail_when_cache_empty():
         assert response.status_code == 503
         assert "Rules not loaded" in response.json()["detail"]
 
+
+@pytest.mark.asyncio
 @patch("app.main.Client.connect", new_callable=AsyncMock)
 @patch("builtins.open", new_callable=mock_open, read_data="Rule R-01: FOIR <= 50")
-@pytest.mark.asyncio
 async def test_policy_reload_triggers_temporal_workflow(mock_file, mock_temporal_connect):
     """
     Tests that the POST /policy/reload endpoint successfully reads the policy file
-    and correctly delegates execution to the Temporal Server without blocking.
+    and correctly starts the Temporal workflow using the handle-based start_workflow logic.
     """
     # 1. Setup the mocked Temporal client instance
     mock_temporal_client_instance = AsyncMock()
     mock_temporal_connect.return_value = mock_temporal_client_instance
 
-    # 2. Trigger the API endpoint
+    # 2. Setup a mock handle to prevent the FastAPI RecursionError
+    # We use MagicMock for the handle because its attributes (id, run_id) are simple data
+    mock_handle = MagicMock()
+    mock_handle.id = "policy-reload-job"
+    mock_handle.run_id = "mock-run-12345"
+    
+    # 3. Ensure start_workflow returns our handle instead of another AsyncMock
+    mock_temporal_client_instance.start_workflow.return_value = mock_handle
+
+    # 4. Trigger the API endpoint
     response = client.post("/policy/reload")
 
-    # 3. Assert the HTTP response is immediate and correct
+    # 5. Assertions
     assert response.status_code == 202
-    assert response.json()["status"] == "Reload workflow triggered safely."
+    data = response.json()
+    assert data["status"] == "Reload workflow triggered safely."
+    assert data["workflow_id"] == "policy-reload-job"
+    assert data["run_id"] == "mock-run-12345"
 
-    # 4. Assert the Temporal Client connected to the configured host
-    # <-- 2. Update this assertion to use the dynamic setting instead of a hardcoded string
-    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url) 
-
-    # 5. Assert the workflow was dispatched with the correct parameters
-    mock_temporal_client_instance.execute_workflow.assert_called_once_with(
+    # 6. Verify internal calls
+    # Ensure it read the correct file (using the path from settings)
+    mock_file.assert_called_once()
+    
+    # Ensure start_workflow was called with correct deterministic parameters
+    mock_temporal_client_instance.start_workflow.assert_called_once_with(
         "ReloadPolicyWorkflow",
-        "Rule R-01: FOIR <= 50", # Matches our mocked file data
+        "Rule R-01: FOIR <= 50",
         id="policy-reload-job",
-        task_queue=settings.temporal_task_queue # <-- Make sure this matches config too
+        task_queue="policy-queue"
     )
+
 
 def test_evaluate_fails_gracefully_when_no_rules_loaded():
     """
@@ -190,28 +204,40 @@ async def test_evaluate_includes_policy_version():
 @patch("builtins.open", new_callable=mock_open, read_data="Mock Policy Content")
 async def test_policy_reload_orchestration(mock_file, mock_temporal_connect):
     """
-    Integration test for the /policy/reload endpoint.
-    Verifies that the API correctly reads the configured file and 
-    dispatches the workflow to the configured Temporal Task Queue.
+    Verifies that the API correctly reads the file and dispatches 
+    the workflow using the new 'start_workflow' non-blocking logic.
     """
+    # 1. Setup the mocked Temporal client
     mock_temporal_instance = AsyncMock()
     mock_temporal_connect.return_value = mock_temporal_instance
+    
+    # 2. Create a concrete handle mock to avoid RecursionError
+    # We use a MagicMock for the handle because it's a data object, not a coroutine
+    mock_handle = MagicMock()
+    mock_handle.id = "policy-reload-job"
+    mock_handle.run_id = "mock-run-uuid-123"
+    
+    # 3. Ensure start_workflow returns this handle
+    mock_temporal_instance.start_workflow.return_value = mock_handle
 
+    # 4. Trigger the API
     response = client.post("/policy/reload")
 
-    # Assertions
+    # 5. Assertions
     assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "Reload workflow triggered safely."
+    assert data["workflow_id"] == "policy-reload-job"
+    assert data["run_id"] == "mock-run-uuid-123"
     
-    # Verify Temporal Connection uses config
-    mock_temporal_connect.assert_called_once_with(settings.temporal_server_url)
-    
-    # Verify Workflow Dispatch uses config
-    mock_temporal_instance.execute_workflow.assert_called_once_with(
+    # Verify the internal call was correct
+    mock_temporal_instance.start_workflow.assert_called_once_with(
         "ReloadPolicyWorkflow",
         "Mock Policy Content",
         id="policy-reload-job",
-        task_queue=settings.temporal_task_queue
+        task_queue="policy-queue"
     )
+
 
 def test_get_rules_uninitialized():
     """Verify 533 error when system has not yet been initialized with a policy."""

@@ -62,19 +62,18 @@ class ApplicantPayload(BaseModel):
         proposed_emi = (p * r * (1 + r)**n) / ((1 + r)**n - 1)
         self.foir = ((self.existing_emi_obligations + proposed_emi) / self.monthly_income) * 100
 
-        # 1. The "Logic Bridge" for New-to-Credit (NTC)
-        # Standardizes the field so the LLM only needs to extract ONE rule
-        if self.credit_score in [-1, 0]:
-            self.credit_eligibility_score = self.co_applicant_score if self.co_applicant_score else 0
+        
+        # 1: Conditional CIBIL Threshold Bridge
+        # Threshold is 700 ONLY IF loan > 250,000. 
+        # Otherwise, it defaults to a lower internal limit (e.g., 650) or the rule's static value.
+        if self.loan_request.amount > 250000:
+            self.effective_cibil_threshold = 700
         else:
-            self.credit_eligibility_score = self.credit_score
-
+            self.effective_cibil_threshold = 0 # Or a baseline score
         # 2. Logic Bridge for Tiered CIBIL (MSME Policy Section 3)
         # If loan > 10 Lakhs, threshold is 750, else 700.
         if self.loan_request.amount > 1000000:
             self.effective_cibil_threshold = 750
-        else:
-            self.effective_cibil_threshold = 700
         
         # 3. Negative Industry Logic
         negative_list = {
@@ -83,6 +82,13 @@ class ApplicantPayload(BaseModel):
             "perishable trading"
         }
         
+        # 4. The "Logic Bridge" for New-to-Credit (NTC)
+        # Standardizes the field so the LLM only needs to extract ONE rule
+        if self.credit_score in [-1, 0]:
+            self.credit_eligibility_score = self.co_applicant_score if self.co_applicant_score else 0
+        else:
+            self.credit_eligibility_score = self.credit_score
+
         # Exact match or "Contains" logic could be applied here
         self.is_industry_allowed = self.industry_type.lower() not in negative_list
         

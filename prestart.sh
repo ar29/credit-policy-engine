@@ -13,4 +13,4 @@ python -c "from app.models.schemas import Base; from sqlalchemy import create_en
 
 # 3. Start the application
 echo "Starting FastAPI..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # Database for Temporal & Audit Trails
   postgres:
     image: postgres:15-alpine
     container_name: prayaan-postgres
@@ -19,14 +16,12 @@ services:
       timeout: 5s
       retries: 5
 
-  # Message Broker for Hot-Reloading
   redis:
     image: redis:7-alpine
     container_name: prayaan-redis
     ports:
       - "6379:6379"
 
-  # Temporal Server for Orchestration
   temporal:
     image: temporalio/auto-setup:1.22.0
     container_name: prayaan-temporal
@@ -44,7 +39,6 @@ services:
       postgres:
         condition: service_healthy
 
-  # Local LLM Service
   ollama:
     image: ollama/ollama:latest
     container_name: prayaan-ollama
@@ -53,7 +47,6 @@ services:
     volumes:
       - ./ollama_data:/root/.ollama
 
-  # FastAPI Evaluation Engine
   api:
     build: .
     container_name: prayaan-api
@@ -67,8 +60,14 @@ services:
         condition: service_started
       temporal:
         condition: service_started
+    develop:
+      watch:
+        - path: ./app
+          action: sync
+          target: /code/app
+        - path: ./requirements.txt
+          action: rebuild
 
-  # Temporal Worker (Policy Compiler)
   worker:
     build: .
     container_name: prayaan-worker
@@ -79,6 +78,16 @@ services:
         condition: service_started
       ollama:
         condition: service_started
+    develop:
+      watch:
+        - path: ./worker
+          action: sync+restart
+          target: /code/worker
+        - path: ./app
+          action: sync+restart
+          target: /code/app
+        - path: ./requirements.txt
+          action: rebuild
 
 volumes:
   postgres_data:

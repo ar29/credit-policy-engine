@@ -430,11 +430,7 @@ curl -X POST "http://localhost:8000/policy/reload"
    ```bash
    docker-compose up -d --build
    ```
-4. Pull the Llama3 model into the Ollama container (Required on first boot):
-   ```bash
-   docker exec -it prayaan-engine-ollama-1 ollama run llama3
-   ```
-5. The API is now available at: `http://localhost:8000/docs`
+4. The API is now available at: `http://localhost:8000/docs`
 
 >In a distributed system, the API and Worker will crash if they try to connect to Postgres before it has finished initializing its internal schemas. I have added a healthcheck to the Postgres service and used the service_healthy condition in the dependencies. I have also consolidated the environment variables into the .env file for cleaner orchestration.
 >
