@@ -8,7 +8,8 @@ from app.models.schemas import ApplicantPayload, DecisionResponse, RuleSchema
 from app.services.engine import DeterministicRuleEngine
 from sqlalchemy.orm import Session
 from app.models.schemas import EvaluationAudit, Base, PolicyAudit
-from worker.policy_workflow import SessionLocal
+from app.core.database import SessionLocal # NEW IMPORT
+
 
 app = FastAPI(title="Prayaan Credit Engine")
 engine = DeterministicRuleEngine()

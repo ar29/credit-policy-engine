@@ -1,5 +1,6 @@
 import threading
 import json
+import logging
 import redis.asyncio as redis
 from typing import List
 from app.models.schemas import RuleSchema
@@ -38,12 +39,31 @@ class DistributedPolicyState:
     async def listen_for_invalidations(self):
         pubsub = self.redis_client.pubsub()
         await pubsub.subscribe("policy_updates")
+        
         async for message in pubsub.listen():
             if message["type"] == "message":
-                new_rules_data = json.loads(message["data"])
-                with self._rw_lock:
-                    self.rules = [RuleSchema(**r) for r in new_rules_data]
-                    self.current_policy_id = new_rules_data["policy_id"] # Synchronize the ID
-                print(f"State Synced: {len(self.rules)} rules hot-reloaded.")
+                try:
+                    # 1. Decode bytes to string, then string to Python object
+                    raw_data = message["data"]
+                    if isinstance(raw_data, bytes):
+                        raw_data = raw_data.decode("utf-8")
+                    
+                    
+                    payload = json.loads(raw_data)
+                    
+                    # 2. Extract the rules and version
+                    new_rules_data = payload.get("rules", [])
+                    new_version = payload.get("version")
+
+                    # 3. Update the thread-safe state
+                    with self._rw_lock:
+                        # Ensure we are passing dictionaries to the Pydantic model
+                        self.rules = [RuleSchema(**r) for r in new_rules_data]
+                        self.current_policy_id = new_version
+                    
+                    logging.info(f"Hot-swap successful: Switched to Policy Version {new_version}")
+
+                except Exception as e:
+                    logging.error(f"Failed to hot-swap policy: {e}")
 
 policy_state = DistributedPolicyState()
