@@ -51,11 +51,6 @@ services:
       - "8080:8080"
     depends_on:
       - temporal
-    develop:
-      # No watch needed here as this is a third-party image
-      watch:
-        - path: ./docker-compose.yml
-          action: rebuild
 
   ollama:
     image: ollama/ollama:latest
