@@ -41,6 +41,7 @@ class ApplicantPayload(BaseModel):
     industry_type: str = "others"
     effective_cibil_threshold: int = 700
     credit_eligibility_score: int = 0
+    business_vintage_months: int = 0
 
     # Virtual fields for the engine to target
     credit_eligibility_score: int = 0
@@ -52,7 +53,8 @@ class ApplicantPayload(BaseModel):
 
     @model_validator(mode='after')
     def compute_derived_fields(self):
-        self.loan_maturity_age = self.age + (self.loan_request.tenure_months / 12)
+        if self.loan_maturity_age == 0.0:
+            self.loan_maturity_age = self.age + (self.loan_request.tenure_months / 12)
         
         # FOIR calculation: 1.5% flat monthly interest assumption for proposed EMI
         # EMI Calculation (Approx 18% ROI for MSME)

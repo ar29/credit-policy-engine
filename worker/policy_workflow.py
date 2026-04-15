@@ -54,11 +54,13 @@ async def extract_rules_from_llm(policy_text: str) -> list:
             "existing_emi_obligations", 
             "credit_score", 
             "co_applicant_score", 
-            "industry_type", 
+            "industry_type",
+            "loan_maturity_age",
             "effective_cibil_threshold", 
             "credit_eligibility_score", 
             "industry_type", 
             "co_applicant_score",
+            "business_vintage_months"
         ]
         operator: Literal[">", ">=", "<", "<=", "=="]
         threshold: float # Float covers both ints and decimals in JSON
@@ -94,6 +96,16 @@ async def extract_rules_from_llm(policy_text: str) -> list:
     7. "Co-applicant Score", "Secondary Applicant CIBIL" -> field: "co_applicant_score"
     8. "Effective CIBIL Threshold", "Dynamic CIBIL Limit" -> field: "effective_cibil_threshold"
     9. "Credit Eligibility Score", "NTC Score" -> field: "credit_eligibility_score"
+    ### STRICT FIELD MAPPING ANCHORS
+    10. "Current Age", "Applicant Age" -> field: "age" (Unit: Years)
+    11. "Maturity Age", "Age at end of tenure" -> field: "loan_maturity_age" (Unit: Years)
+
+    ### STRICT FIELD MAPPING ANCHORS
+    12. "Business Vintage", "Operational for", "Registration date" -> field: "business_vintage_months" (Unit: Months)
+
+    ### CRITICAL LOGIC RULE
+    DO NOT map business operational requirements to the 'age' field. Use 'business_vintage_months'.
+    DO NOT map maturity age requirements to the 'age' field. Use 'loan_maturity_age'.
 
 
     ### DATA TYPE CONSTRAINTS

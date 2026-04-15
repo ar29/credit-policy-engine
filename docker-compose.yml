@@ -39,6 +39,24 @@ services:
       postgres:
         condition: service_healthy
 
+  temporal-ui:
+    image: temporalio/ui:2.21.3
+    container_name: prayaan-temporal-ui
+    environment:
+      # Use the gRPC endpoint for internal docker communication
+      - TEMPORAL_GRPC_ENDPOINT=temporal:7233
+      # Use the web addr for the UI to know its own location
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+    develop:
+      # No watch needed here as this is a third-party image
+      watch:
+        - path: ./docker-compose.yml
+          action: rebuild
+
   ollama:
     image: ollama/ollama:latest
     container_name: prayaan-ollama
